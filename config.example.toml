@@ -1,0 +1,79 @@
+# rohanboard config — copy to ~/.config/rohanboard/config.toml and edit.
+# Everything here is read at startup; restart the app to apply changes.
+
+[refresh]
+# Per-collector poll intervals (seconds). 0 disables auto-refresh.
+slurm_jobs   = 5
+slurm_nodes  = 30
+storage      = 60
+
+[slurm]
+# Restrict views to these partitions; empty list = all partitions.
+include_partitions = []
+exclude_partitions = []
+# Show jobs of these users; "self" expands to $USER.
+users = ["self"]
+
+[storage]
+# Each entry becomes a progress bar in the Storage tab.
+# `kind = "quota"` uses `quota -u $USER` (rohan login only).
+# `kind = "df"`    uses `df -B1` against `path`.
+[[storage.entries]]
+label = "home"
+kind  = "quota"
+filesystem = "/dev/mapper/i28storage-data"  # matches `quota` output
+
+# kind = "auto" expands to one bar per mounted path under any of `prefixes`.
+# Aliases sharing a backing source are deduplicated (one bar per source).
+[[storage.entries]]
+label = "auto"
+kind  = "auto"
+prefixes = ["/cluster", "/cluster_HDD"]
+
+# Or pin a specific mount (kind = "df" with explicit path):
+# [[storage.entries]]
+# label = "/cluster/balar"
+# kind  = "df"
+# path  = "/cluster/balar"
+
+[layout]
+# Tab order + which widgets appear on each tab.
+# Widget IDs:
+#   overview_panel, storage_panel, jobs_table, nodes_table, nodes_summary,
+#   utilization_panel, home_storage, compact_jobs, ascii_art.
+#
+# `overview_panel` composes the cluster-totals + home + jobs + utilization
+# + decoration layout automatically and is the recommended single widget
+# for the Overview tab.
+[[layout.tabs]]
+id = "overview"
+title = "Overview"
+widgets = ["overview_panel"]
+
+[[layout.tabs]]
+id = "jobs"
+title = "Jobs"
+widgets = ["jobs_table"]
+
+[[layout.tabs]]
+id = "nodes"
+title = "Nodes"
+widgets = ["nodes_summary", "nodes_table"]
+
+[[layout.tabs]]
+id = "storage"
+title = "Storage"
+widgets = ["storage_panel"]
+
+[theme]
+# Path is relative to rohanboard/styles/, or absolute.
+file = "default.tcss"
+
+[overview]
+# Decoration shown in the Overview tab's bottom panel when there is
+# vertical slack:
+#   "art"    — static rohan ASCII logo (default)
+#   "matrix" — cmatrix-style falling colored glyphs
+#   "fire"   — DOOM PSX fire effect
+#   "none"   — hide the decoration entirely
+animation = "art"

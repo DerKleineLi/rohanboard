@@ -1,0 +1,64 @@
+Screen {
+    background: $surface;
+}
+
+Header {
+    background: $primary;
+}
+
+TabbedContent {
+    height: 1fr;
+}
+
+/* Strip the default 1-row top/bottom padding so single-pane tabs
+ * don't overflow by exactly the padding amount. */
+TabPane {
+    padding: 0;
+}
+
+.tab-body {
+    height: 1fr;
+    width: 1fr;
+    padding: 0;
+    /* Hide scrollbars when content fits — Textual default is "auto" but
+     * the overlay reserves a column; "auto" with scrollbar-gutter:stable=off
+     * makes it appear/disappear cleanly. */
+    overflow-y: auto;
+    overflow-x: auto;
+    scrollbar-size: 1 1;
+}
+
+.placeholder {
+    padding: 2 4;
+    color: $text-muted;
+    border: round $primary;
+    margin: 1 2;
+}
+
+DataTable {
+    background: $surface;
+}
+
+DataTable > .datatable--header {
+    text-style: bold;
+    color: $accent;
+}
+
+/* ── Responsive rules: trigger off classes on the screen ── */
+
+Screen.narrow StoragePanel,
+Screen.narrow JobsTable,
+Screen.narrow NodesTable,
+Screen.narrow NodesSummary {
+    margin: 0 1;
+    padding: 0 1;
+}
+
+Screen.narrow NodesSummary #summary_body {
+    /* compact one-line summary on tiny terminals */
+    height: auto;
+}
+
+Screen.narrow JobsTable {
+    min-height: 6;
+}

@@ -1,0 +1,409 @@
+NodeName=andram Arch=x86_64 CoresPerSocket=48 
+   CPUAlloc=17 CPUEfctv=96 CPUTot=96 CPULoad=10.15
+   AvailableFeatures=a100
+   ActiveFeatures=a100
+   Gres=gpu:a100:4,mps:a100:400
+   NodeAddr=131.159.98.136 NodeHostName=andram Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=1001519 AllocMem=442368 FreeMem=622625 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=a100_submit,a100_interactive 
+   BootTime=2025-06-20T11:06:25 SlurmdStartTime=2026-03-13T13:55:30
+   LastBusyTime=2026-03-13T13:55:30 ResumeAfterTime=None
+   CfgTRES=cpu=96,mem=1001519M,billing=79,gres/gpu=4
+   AllocTRES=cpu=17,mem=432G,gres/gpu=3
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=angmar Arch=x86_64 CoresPerSocket=40 
+   CPUAlloc=80 CPUEfctv=80 CPUTot=80 CPULoad=14.55
+   AvailableFeatures=rtx_a6000
+   ActiveFeatures=rtx_a6000
+   Gres=gpu:rtx_a6000:8,mps:rtx_a6000:800
+   NodeAddr=131.159.98.107 NodeHostName=angmar Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=742683 AllocMem=634880 FreeMem=552115 Sockets=2 Boards=1
+   State=ALLOCATED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_a6000_submit,rtx_a6000_interactive 
+   BootTime=2026-03-23T16:19:00 SlurmdStartTime=2026-04-22T19:18:39
+   LastBusyTime=2026-04-22T11:22:12 ResumeAfterTime=None
+   CfgTRES=cpu=80,mem=742683M,billing=79,gres/gpu=8
+   AllocTRES=cpu=80,mem=620G,gres/gpu=7
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=balar Arch=x86_64 CoresPerSocket=48 
+   CPUAlloc=20 CPUEfctv=96 CPUTot=96 CPULoad=15.08
+   AvailableFeatures=a100
+   ActiveFeatures=a100
+   Gres=gpu:a100:4,mps:a100:400
+   NodeAddr=131.159.98.130 NodeHostName=balar Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=1001519 AllocMem=368640 FreeMem=733497 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=a100_submit,a100_interactive 
+   BootTime=2025-08-12T10:13:22 SlurmdStartTime=2026-03-13T13:55:28
+   LastBusyTime=2026-04-23T08:11:25 ResumeAfterTime=None
+   CfgTRES=cpu=96,mem=1001519M,billing=79,gres/gpu=4
+   AllocTRES=cpu=20,mem=360G,gres/gpu=4
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=balrog Arch=x86_64 CoresPerSocket=40 
+   CPUAlloc=29 CPUEfctv=80 CPUTot=80 CPULoad=3.75
+   AvailableFeatures=rtx_3090
+   ActiveFeatures=rtx_3090
+   Gres=gpu:rtx_3090:8,mps:rtx_3090:800
+   NodeAddr=balrog.vc.in.tum.de NodeHostName=balrog Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=742673 AllocMem=572416 FreeMem=757396 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_3090_submit,rtx_3090_interactive 
+   BootTime=2026-03-25T11:07:40 SlurmdStartTime=2026-03-25T11:11:45
+   LastBusyTime=2026-04-20T09:56:54 ResumeAfterTime=None
+   CfgTRES=cpu=80,mem=742673M,billing=39,gres/gpu=8
+   AllocTRES=cpu=29,mem=559G,gres/gpu=8
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=char Arch=x86_64 CoresPerSocket=12 
+   CPUAlloc=0 CPUEfctv=12 CPUTot=12 CPULoad=0.08
+   AvailableFeatures=gtx_1080
+   ActiveFeatures=gtx_1080
+   Gres=gpu:gtx_1080:4,mps:gtx_1080:800
+   NodeAddr=char.vc.in.tum.de NodeHostName=char Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=118676 AllocMem=0 FreeMem=104942 Sockets=1 Boards=1
+   State=IDLE ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=gtx_1080_submit,gtx_1080_interactive 
+   BootTime=2026-03-12T14:46:33 SlurmdStartTime=2026-03-13T13:55:25
+   LastBusyTime=2026-04-23T10:28:41 ResumeAfterTime=None
+   CfgTRES=cpu=12,mem=118676M,gres/gpu=4
+   AllocTRES=
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=daidalos Arch=x86_64 CoresPerSocket=40 
+   CPUAlloc=28 CPUEfctv=80 CPUTot=80 CPULoad=44.92
+   AvailableFeatures=rtx_a6000
+   ActiveFeatures=rtx_a6000
+   Gres=gpu:rtx_a6000:8,mps:rtx_a6000:800
+   NodeAddr=daidalos.vc.in.tum.de NodeHostName=daidalos Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=742673 AllocMem=450560 FreeMem=308271 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_a6000_submit,rtx_a6000_interactive 
+   BootTime=2026-03-18T13:06:14 SlurmdStartTime=2026-03-18T13:08:30
+   LastBusyTime=2026-03-18T13:13:37 ResumeAfterTime=None
+   CfgTRES=cpu=80,mem=742673M,billing=79,gres/gpu=8
+   AllocTRES=cpu=28,mem=440G,gres/gpu=8
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=doriath Arch=x86_64 CoresPerSocket=48 
+   CPUAlloc=20 CPUEfctv=96 CPUTot=96 CPULoad=5.53
+   AvailableFeatures=a100
+   ActiveFeatures=a100
+   Gres=gpu:a100:4,mps:a100:400
+   NodeAddr=131.159.98.138 NodeHostName=doriath Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=1001519 AllocMem=368640 FreeMem=868789 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=a100_submit,a100_interactive 
+   BootTime=2025-07-14T09:15:54 SlurmdStartTime=2026-03-13T13:55:34
+   LastBusyTime=2026-04-21T19:58:35 ResumeAfterTime=None
+   CfgTRES=cpu=96,mem=1001519M,billing=79,gres/gpu=4
+   AllocTRES=cpu=20,mem=360G,gres/gpu=4
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=erebor Arch=x86_64 CoresPerSocket=40 
+   CPUAlloc=49 CPUEfctv=80 CPUTot=80 CPULoad=80.97
+   AvailableFeatures=rtx_a6000
+   ActiveFeatures=rtx_a6000
+   Gres=gpu:rtx_a6000:8,mps:rtx_a6000:800
+   NodeAddr=131.159.98.87 NodeHostName=erebor Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=742683 AllocMem=503808 FreeMem=737853 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_a6000_submit,rtx_a6000_interactive 
+   BootTime=2026-03-22T17:45:28 SlurmdStartTime=2026-03-22T17:48:13
+   LastBusyTime=2026-04-14T17:50:01 ResumeAfterTime=None
+   CfgTRES=cpu=80,mem=742683M,billing=79,gres/gpu=8
+   AllocTRES=cpu=49,mem=492G,gres/gpu=8
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=eriador Arch=x86_64 CoresPerSocket=40 
+   CPUAlloc=40 CPUEfctv=80 CPUTot=80 CPULoad=10.01
+   AvailableFeatures=rtx_a6000
+   ActiveFeatures=rtx_a6000
+   Gres=gpu:rtx_a6000:8,mps:rtx_a6000:800
+   NodeAddr=131.159.98.89 NodeHostName=eriador Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=742683 AllocMem=737280 FreeMem=534223 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_a6000_submit,rtx_a6000_interactive 
+   BootTime=2026-04-02T11:11:20 SlurmdStartTime=2026-04-02T11:13:41
+   LastBusyTime=2026-04-23T03:13:26 ResumeAfterTime=None
+   CfgTRES=cpu=80,mem=742683M,billing=79,gres/gpu=8
+   AllocTRES=cpu=40,mem=720G,gres/gpu=8
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=falas Arch=x86_64 CoresPerSocket=48 
+   CPUAlloc=1 CPUEfctv=96 CPUTot=96 CPULoad=29.26
+   AvailableFeatures=a100
+   ActiveFeatures=a100
+   Gres=gpu:a100:4,mps:a100:400
+   NodeAddr=131.159.98.137 NodeHostName=falas Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=1001519 AllocMem=131072 FreeMem=488626 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=a100_submit,a100_interactive 
+   BootTime=2025-03-14T15:34:04 SlurmdStartTime=2026-03-13T13:55:35
+   LastBusyTime=2026-04-22T17:44:56 ResumeAfterTime=None
+   CfgTRES=cpu=96,mem=1001519M,billing=79,gres/gpu=4
+   AllocTRES=cpu=1,mem=128G,gres/gpu=1
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=gimli Arch=x86_64 CoresPerSocket=40 
+   CPUAlloc=0 CPUEfctv=80 CPUTot=80 CPULoad=3.85
+   AvailableFeatures=rtx_3090
+   ActiveFeatures=rtx_3090
+   Gres=gpu:rtx_3090:8,mps:rtx_3090:800
+   NodeAddr=gimli.vc.in.tum.de NodeHostName=gimli Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=742673 AllocMem=0 FreeMem=591448 Sockets=2 Boards=1
+   State=IDLE+DRAIN ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_3090_submit,rtx_3090_interactive 
+   BootTime=2026-01-29T15:14:19 SlurmdStartTime=2026-03-13T13:55:28
+   LastBusyTime=2026-04-23T11:34:49 ResumeAfterTime=None
+   CfgTRES=cpu=80,mem=742673M,billing=39,gres/gpu=8
+   AllocTRES=
+   CurrentWatts=0 AveWatts=0
+   
+   Reason=updating nvidia-driver [root@2026-04-21T17:01:41]
+
+NodeName=gondor Arch=x86_64 CoresPerSocket=36 
+   CPUAlloc=12 CPUEfctv=72 CPUTot=72 CPULoad=0.05
+   AvailableFeatures=rtx_2080
+   ActiveFeatures=rtx_2080
+   Gres=gpu:rtx_2080:9,mps:rtx_2080:900
+   NodeAddr=gondor.vc.in.tum.de NodeHostName=gondor Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=742673 AllocMem=65536 FreeMem=656465 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_2080_submit,rtx_2080_interactive 
+   BootTime=2025-08-11T10:01:44 SlurmdStartTime=2026-03-13T13:55:26
+   LastBusyTime=2026-04-20T07:05:19 ResumeAfterTime=None
+   CfgTRES=cpu=72,mem=742673M,billing=5,gres/gpu=9
+   AllocTRES=cpu=12,mem=64G
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=himring Arch=x86_64 CoresPerSocket=40 
+   CPUAlloc=40 CPUEfctv=80 CPUTot=80 CPULoad=4.19
+   AvailableFeatures=rtx_a6000
+   ActiveFeatures=rtx_a6000
+   Gres=gpu:rtx_a6000:8,mps:rtx_a6000:800
+   NodeAddr=himring.vc.in.tum.de NodeHostName=himring Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=742673 AllocMem=737280 FreeMem=551402 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_a6000_submit,rtx_a6000_interactive 
+   BootTime=2026-04-04T17:38:06 SlurmdStartTime=2026-04-04T17:40:42
+   LastBusyTime=2026-04-22T11:51:36 ResumeAfterTime=None
+   CfgTRES=cpu=80,mem=742673M,billing=79,gres/gpu=8
+   AllocTRES=cpu=40,mem=720G,gres/gpu=8
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=hithlum Arch=x86_64 CoresPerSocket=40 
+   CPUAlloc=80 CPUEfctv=80 CPUTot=80 CPULoad=0.00
+   AvailableFeatures=rtx_a6000
+   ActiveFeatures=rtx_a6000
+   Gres=gpu:rtx_a6000:8,mps:rtx_a6000:800
+   NodeAddr=hithlum.vc.in.tum.de NodeHostName=hithlum Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=742673 AllocMem=294432 FreeMem=757401 Sockets=2 Boards=1
+   State=ALLOCATED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_a6000_submit,rtx_a6000_interactive 
+   BootTime=2026-04-03T01:53:09 SlurmdStartTime=2026-04-03T01:55:52
+   LastBusyTime=2026-04-22T18:46:37 ResumeAfterTime=None
+   CfgTRES=cpu=80,mem=742673M,billing=79,gres/gpu=8
+   AllocTRES=cpu=80,mem=294432M,gres/gpu=4
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=ikarus Arch=x86_64 CoresPerSocket=40 
+   CPUAlloc=40 CPUEfctv=80 CPUTot=80 CPULoad=3.13
+   AvailableFeatures=rtx_a6000
+   ActiveFeatures=rtx_a6000
+   Gres=gpu:rtx_a6000:8,mps:rtx_a6000:800
+   NodeAddr=131.159.98.78 NodeHostName=ikarus Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=742688 AllocMem=737280 FreeMem=509979 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_a6000_submit,rtx_a6000_interactive 
+   BootTime=2026-03-20T16:05:35 SlurmdStartTime=2026-03-23T16:33:33
+   LastBusyTime=2026-04-22T11:54:06 ResumeAfterTime=None
+   CfgTRES=cpu=80,mem=742688M,billing=79,gres/gpu=8
+   AllocTRES=cpu=40,mem=720G,gres/gpu=8
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=lothlann Arch=x86_64 CoresPerSocket=36 
+   CPUAlloc=0 CPUEfctv=72 CPUTot=72 CPULoad=4.44
+   AvailableFeatures=rtx_2080
+   ActiveFeatures=rtx_2080
+   Gres=gpu:rtx_2080:8,mps:rtx_2080:800
+   NodeAddr=lothlann.vc.in.tum.de NodeHostName=lothlann Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=742673 AllocMem=0 FreeMem=496864 Sockets=2 Boards=1
+   State=IDLE ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_2080_submit,rtx_2080_interactive 
+   BootTime=2026-01-31T12:43:08 SlurmdStartTime=2026-03-13T13:55:25
+   LastBusyTime=2026-04-22T16:15:06 ResumeAfterTime=None
+   CfgTRES=cpu=72,mem=742673M,billing=4,gres/gpu=8
+   AllocTRES=
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=moria Arch=x86_64 CoresPerSocket=36 
+   CPUAlloc=0 CPUEfctv=72 CPUTot=72 CPULoad=0.14
+   AvailableFeatures=rtx_2080
+   ActiveFeatures=rtx_2080
+   Gres=gpu:rtx_2080:8,mps:rtx_2080:800
+   NodeAddr=moria.vc.in.tum.de NodeHostName=moria Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=762673 AllocMem=0 FreeMem=688891 Sockets=2 Boards=1
+   State=IDLE ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_2080_submit,rtx_2080_interactive 
+   BootTime=2025-03-14T15:30:50 SlurmdStartTime=2026-03-13T13:55:26
+   LastBusyTime=2026-04-22T17:21:13 ResumeAfterTime=None
+   CfgTRES=cpu=72,mem=762673M,billing=4,gres/gpu=8
+   AllocTRES=
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=pegasus Arch=x86_64 CoresPerSocket=36 
+   CPUAlloc=0 CPUEfctv=72 CPUTot=72 CPULoad=2.35
+   AvailableFeatures=gtx_1080
+   ActiveFeatures=gtx_1080
+   Gres=gpu:gtx_1080:8,mps:gtx_1080:800
+   NodeAddr=pegasus.vc.in.tum.de NodeHostName=pegasus Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=375623 AllocMem=0 FreeMem=294312 Sockets=2 Boards=1
+   State=IDLE ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=gtx_1080_submit,gtx_1080_interactive 
+   BootTime=2025-03-26T17:05:52 SlurmdStartTime=2026-03-13T13:55:26
+   LastBusyTime=2026-04-22T16:40:57 ResumeAfterTime=None
+   CfgTRES=cpu=72,mem=375623M,billing=1,gres/gpu=8
+   AllocTRES=
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=ramdal Arch=x86_64 CoresPerSocket=48 
+   CPUAlloc=32 CPUEfctv=96 CPUTot=96 CPULoad=33.14
+   AvailableFeatures=a100
+   ActiveFeatures=a100
+   Gres=gpu:a100:4,mps:a100:400
+   NodeAddr=131.159.98.135 NodeHostName=ramdal Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=1001519 AllocMem=327680 FreeMem=781138 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=a100_submit,a100_interactive 
+   BootTime=2025-04-14T10:30:01 SlurmdStartTime=2026-03-13T13:55:35
+   LastBusyTime=2026-04-16T14:18:34 ResumeAfterTime=None
+   CfgTRES=cpu=96,mem=1001519M,billing=79,gres/gpu=4
+   AllocTRES=cpu=32,mem=320G,gres/gpu=4
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=seti Arch=x86_64 CoresPerSocket=36 
+   CPUAlloc=0 CPUEfctv=72 CPUTot=72 CPULoad=1.28
+   AvailableFeatures=rtx_2080
+   ActiveFeatures=rtx_2080
+   Gres=gpu:rtx_2080:8,mps:rtx_2080:800
+   NodeAddr=seti.vc.in.tum.de NodeHostName=seti Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=762673 AllocMem=0 FreeMem=671908 Sockets=2 Boards=1
+   State=IDLE ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_2080_submit,rtx_2080_interactive 
+   BootTime=2025-03-14T15:32:13 SlurmdStartTime=2026-03-13T13:55:25
+   LastBusyTime=2026-04-22T16:42:44 ResumeAfterTime=None
+   CfgTRES=cpu=72,mem=762673M,billing=4,gres/gpu=8
+   AllocTRES=
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=sorona Arch=x86_64 CoresPerSocket=36 
+   CPUAlloc=0 CPUEfctv=72 CPUTot=72 CPULoad=2.93
+   AvailableFeatures=rtx_2080
+   ActiveFeatures=rtx_2080
+   Gres=gpu:rtx_2080:8,mps:rtx_2080:800
+   NodeAddr=sorona.vc.in.tum.de NodeHostName=sorona Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=375602 AllocMem=0 FreeMem=268541 Sockets=2 Boards=1
+   State=IDLE ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_2080_submit,rtx_2080_interactive 
+   BootTime=2025-03-14T15:33:27 SlurmdStartTime=2026-03-13T13:55:26
+   LastBusyTime=2026-04-22T16:41:47 ResumeAfterTime=None
+   CfgTRES=cpu=72,mem=375602M,billing=4,gres/gpu=8
+   AllocTRES=
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=tarsonis Arch=x86_64 CoresPerSocket=12 
+   CPUAlloc=0 CPUEfctv=12 CPUTot=12 CPULoad=0.01
+   AvailableFeatures=gtx_1080
+   ActiveFeatures=gtx_1080
+   Gres=gpu:gtx_1080:4,mps:gtx_1080:400
+   NodeAddr=tarsonis.vc.in.tum.de NodeHostName=tarsonis Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=118780 AllocMem=0 FreeMem=92175 Sockets=1 Boards=1
+   State=IDLE ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=gtx_1080_submit,gtx_1080_interactive 
+   BootTime=2026-03-12T14:21:16 SlurmdStartTime=2026-03-13T13:55:25
+   LastBusyTime=2026-04-20T18:00:39 ResumeAfterTime=None
+   CfgTRES=cpu=12,mem=118780M,gres/gpu=4
+   AllocTRES=
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=umoja Arch=x86_64 CoresPerSocket=36 
+   CPUAlloc=0 CPUEfctv=72 CPUTot=72 CPULoad=0.24
+   AvailableFeatures=rtx_2080
+   ActiveFeatures=rtx_2080
+   Gres=gpu:rtx_2080:8,mps:rtx_2080:800
+   NodeAddr=umoja.vc.in.tum.de NodeHostName=umoja Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=375601 AllocMem=0 FreeMem=285987 Sockets=2 Boards=1
+   State=IDLE ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_2080_submit,rtx_2080_interactive 
+   BootTime=2026-02-16T19:47:42 SlurmdStartTime=2026-03-13T13:55:28
+   LastBusyTime=2026-04-22T16:51:19 ResumeAfterTime=None
+   CfgTRES=cpu=72,mem=375601M,billing=4,gres/gpu=8
+   AllocTRES=
+   CurrentWatts=0 AveWatts=0
+   
+
+NodeName=valinor Arch=x86_64 CoresPerSocket=40 
+   CPUAlloc=40 CPUEfctv=80 CPUTot=80 CPULoad=0.00
+   AvailableFeatures=rtx_a6000
+   ActiveFeatures=rtx_a6000
+   Gres=gpu:rtx_a6000:8,mps:rtx_a6000:800
+   NodeAddr=131.159.98.106 NodeHostName=valinor Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=742683 AllocMem=352256 FreeMem=756454 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_a6000_submit,rtx_a6000_interactive 
+   BootTime=2026-04-04T10:36:46 SlurmdStartTime=2026-04-04T10:39:22
+   LastBusyTime=2026-04-07T15:14:13 ResumeAfterTime=None
+   CfgTRES=cpu=80,mem=742683M,billing=79,gres/gpu=8
+   AllocTRES=cpu=40,mem=344G,gres/gpu=6
+   CurrentWatts=0 AveWatts=0
+   
+

@@ -1,0 +1,1 @@
+2721325|rtx_a6000_submit|sshd|hli|RUNNING|angmar|None|1-02:28:05|2-21:31:55|1|24|100G|cpu=24,mem=100G,node=1,billing=11,gres/gpu=1

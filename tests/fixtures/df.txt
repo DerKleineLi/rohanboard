@@ -1,0 +1,4 @@
+Filesystem                          1B-blocks           Used     Available Use% Mounted on
+balar.vc.in.tum.de:/local      45847312072704 43514124566528   31591497728 100% /cluster/balar
+sorona.vc.in.tum.de:/local_HDD 31869093543936 26418711887872 3850489561088  88% /cluster_HDD/sorona
+/dev/mapper/i28storage-data    21643952812032 19064114769920 1480309862400  93% /rhome
