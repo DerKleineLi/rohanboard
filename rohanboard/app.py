@@ -17,6 +17,7 @@ from collections import deque
 from .collectors import slurm, storage
 from .collectors.models import Snapshot, StorageEntry, UtilizationSample
 from .config import Config, load as load_config
+from .perf import perf_block, perf_enabled, perf_log
 from .widgets.jobs_table import JobsTable
 from .widgets.nodes_table import NodesSummary, NodesTable
 from .widgets.overview import AsciiArt, CompactJobs, HomeStorage, OverviewPanel
@@ -110,7 +111,9 @@ class RohanBoardApp(App):
         # we just refresh everything on the shortest interval.
         interval = max(min(self.cfg.refresh.slurm_jobs, self.cfg.refresh.slurm_nodes,
                            self.cfg.refresh.storage), 1)
-        self.set_interval(interval, self._refresh_all)
+        # run_worker(exclusive=True) — guards against overlapping ticks if a
+        # previous refresh is still draining.
+        self.set_interval(interval, self._refresh_all_bg)
         # Freeze the GC generations for everything allocated during
         # startup (widget tree, caches, Styles back-references).  This
         # excludes them from future gen-2 scans, which were the root
@@ -178,6 +181,9 @@ class RohanBoardApp(App):
     # data
     # ────────────────────────────────────────────────────────────────────
 
+    def _refresh_all_bg(self) -> None:
+        self.run_worker(self._refresh_all(), exclusive=True, name="refresh_all")
+
     async def _refresh_all(self) -> None:
         snap = Snapshot()
 
@@ -185,19 +191,22 @@ class RohanBoardApp(App):
 
         async def grab_jobs():
             try:
-                snap.jobs = await slurm.fetch_jobs(users_for_fetch)
+                with perf_block("collect", "jobs"):
+                    snap.jobs = await slurm.fetch_jobs(users_for_fetch)
             except Exception as e:
                 snap.errors["jobs"] = str(e)
 
         async def grab_recent():
             try:
-                snap.recent_jobs = await slurm.fetch_recent_jobs(users_for_fetch)
+                with perf_block("collect", "recent"):
+                    snap.recent_jobs = await slurm.fetch_recent_jobs(users_for_fetch)
             except Exception as e:
                 snap.errors["recent_jobs"] = str(e)
 
         async def grab_nodes():
             try:
-                nodes = await slurm.fetch_nodes()
+                with perf_block("collect", "nodes"):
+                    nodes = await slurm.fetch_nodes()
                 if self.cfg.slurm.include_partitions:
                     inc = set(self.cfg.slurm.include_partitions)
                     nodes = [n for n in nodes if any(p in inc for p in n.partitions)]
@@ -209,6 +218,10 @@ class RohanBoardApp(App):
                 snap.errors["nodes"] = str(e)
 
         async def grab_storage():
+            with perf_block("collect", "storage"):
+                await _grab_storage_impl()
+
+        async def _grab_storage_impl():
             entries: list[StorageEntry] = []
             for entry_cfg in self.cfg.storage_entries:
                 try:
@@ -237,7 +250,9 @@ class RohanBoardApp(App):
                     snap.errors[f"storage:{entry_cfg.label}"] = str(e)
             snap.storage = entries
 
-        await asyncio.gather(grab_jobs(), grab_recent(), grab_nodes(), grab_storage())
+        with perf_block("refresh", "gather",
+                         extra=f"jobs={len(snap.jobs)}"):
+            await asyncio.gather(grab_jobs(), grab_recent(), grab_nodes(), grab_storage())
 
         # Append to rolling history (only if we got node data).
         if snap.nodes:
@@ -253,7 +268,9 @@ class RohanBoardApp(App):
                 mem=mem_alloc / mem_total,
             ))
         snap.history = list(self._history)
-        self.snapshot = snap
+        # Reactive write — synchronously triggers watch_snapshot fan-out.
+        with perf_block("refresh", "reactive_set"):
+            self.snapshot = snap
 
     # ────────────────────────────────────────────────────────────────────
     # responsive
@@ -274,12 +291,44 @@ class RohanBoardApp(App):
             screen.add_class("medium")
 
     def watch_snapshot(self, _old: Snapshot, new: Snapshot) -> None:
-        # Broadcast to every mounted widget that knows how to consume one.
-        for widget in self.query("*"):
-            handler = getattr(widget, "update_snapshot", None)
-            if callable(handler):
-                try:
-                    handler(new)
-                except Exception:
-                    import traceback
-                    self.log(f"update_snapshot failed for {widget!r}\n{traceback.format_exc()}")
+        # Defer the actual fan-out to an async broadcast so we can yield
+        # to the event loop between each widget — letting animation
+        # frames interleave with the refresh instead of starving them.
+        self.run_worker(self._broadcast_snapshot(new),
+                        exclusive=True, name="broadcast_snapshot")
+
+    async def _broadcast_snapshot(self, new: Snapshot) -> None:
+        """Push `new` into every widget that implements update_snapshot,
+        yielding to the loop between each so the 20 FPS animation timer
+        can fire in between.
+
+        `batch_update()` coalesces the resulting screen refreshes into a
+        single paint once the fan-out completes.
+        """
+        import time as _t
+        with perf_block("fanout", "all"), self.batch_update():
+            for widget in list(self.query("*")):
+                handler = getattr(widget, "update_snapshot", None)
+                if not callable(handler):
+                    continue
+                if perf_enabled():
+                    t0 = _t.perf_counter()
+                    try:
+                        handler(new)
+                    except Exception:
+                        perf_log("widget", type(widget).__name__,
+                                 (_t.perf_counter() - t0) * 1000, extra="error")
+                        continue
+                    perf_log("widget", type(widget).__name__,
+                             (_t.perf_counter() - t0) * 1000)
+                else:
+                    try:
+                        handler(new)
+                    except Exception:
+                        import traceback
+                        self.log(f"update_snapshot failed for {widget!r}\n{traceback.format_exc()}")
+                # Sleep ~1 ms — long enough that the 50 ms (20 FPS)
+                # animation timer has a real chance to fire between
+                # widget updates rather than getting starved by a tight
+                # `sleep(0)` loop.
+                await asyncio.sleep(0.001)
