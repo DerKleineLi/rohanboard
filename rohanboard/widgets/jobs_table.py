@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 from rich.text import Text
 from textual import events
@@ -309,7 +310,7 @@ class JobsTable(Widget):
         self._row_keys = {}
         self._current_columns = ()
         self._sort_col = "job_id"
-        self._sort_reverse = False
+        self._sort_reverse = True   # newest jobs (highest JOBID) at the top
         self._applied_sort = None
         self._presets = presets or []
 
@@ -346,24 +347,59 @@ class JobsTable(Widget):
 
     # ── mode toggle + preset clicks ──────────────────────────
 
+    # Double-click on a data row opens that job's log.  Architecture:
+    # Textual's DataTable._on_click handler calls event.stop() on row
+    # clicks, so a Click on a row never bubbles up to JobsTable.on_click.
+    # MouseDown DOES bubble though (DataTable._on_mouse_down only brokers,
+    # doesn't stop), and it carries the cell metadata (row/column) in
+    # event.style.meta when the click was on a real cell — empty space
+    # has no metadata, header has row=-1.  So we do double-click detection
+    # in on_mouse_down and leave on_click for the non-row widgets.
+    DOUBLE_CLICK_WINDOW_S: float = 0.4
+    _last_row_click_at: float = 0.0
+    _last_click_row: int = -1
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        # Pull row index from rich-text style metadata.  Empty space click
+        # → meta lacks 'row' (or has out_of_bounds) → ignore.  Header click
+        # → row == -1 → ignore.
+        meta = getattr(getattr(event, "style", None), "meta", None) or {}
+        row = meta.get("row")
+        if row is None or row < 0 or meta.get("out_of_bounds", False):
+            return
+        try:
+            table = self.query_one("#jobs_table_dt", DataTable)
+        except Exception:
+            return
+        if not (0 <= row < table.row_count):
+            return
+
+        now = time.monotonic()
+        if (
+            self._last_click_row == row
+            and (now - self._last_row_click_at) < self.DOUBLE_CLICK_WINDOW_S
+        ):
+            # Genuine fast double-click on the same row → open the log.
+            # Reset so a 3rd click within the window doesn't re-fire.
+            self._last_row_click_at = 0.0
+            self._last_click_row = -1
+            try:
+                table.cursor_coordinate = (row, table.cursor_column or 0)
+            except Exception:
+                pass
+            self.action_tail_log()
+            return
+        # First click on this row (or window expired): record only.  Let
+        # Textual's own _on_click handle cursor placement / row highlight.
+        self._last_row_click_at = now
+        self._last_click_row = row
+
     def on_click(self, event: events.Click) -> None:
+        # Row-click handling lives in on_mouse_down (see comment above).
+        # Here we only handle the non-table widgets whose Click events do
+        # bubble up: mode pills, preset chips, filter help/clear.
         w = getattr(event, "widget", None) or getattr(event, "control", None)
         wid = getattr(w, "id", None) or ""
-        # Double-click on a data row → open the log.  Only when the actual
-        # click is on a data cell (not the header row and not empty space
-        # below the last row), i.e. the DataTable has a valid hovered row.
-        if wid == "jobs_table_dt" and getattr(event, "chain", 1) == 2:
-            table = self.query_one("#jobs_table_dt", DataTable)
-            hovered = getattr(table, "hover_row", None)
-            if hovered is not None and hovered >= 0 and hovered < table.row_count:
-                # Snap the cursor to the row that was actually double-clicked,
-                # then hand off to the shared action.
-                try:
-                    table.cursor_coordinate = (hovered, table.cursor_column or 0)
-                except Exception:
-                    pass
-                self.action_tail_log()
-                return
         if wid == "pill_active" and self.mode != "active":
             self.mode = "active"
         elif wid == "pill_recent" and self.mode != "recent":
@@ -383,11 +419,6 @@ class JobsTable(Widget):
                                                  on_insert=self._insert_filter_fragment))
         elif wid == "filter_clear":
             self.query_one("#filter", Input).value = ""
-
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Textual emits RowSelected on Enter with a row-cursor; treat it
-        as a log-open, so keyboard users have parity with double-click."""
-        self.action_tail_log()
 
     def _insert_filter_fragment(self, fragment: str | None) -> None:
         if not fragment:
