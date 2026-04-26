@@ -259,9 +259,88 @@ def parse_scontrol_show_job(text: str) -> dict[str, str]:
     return dict(_KV_RE.findall(text))
 
 
+_SACCT_FALLBACK_FIELDS = (
+    "JobID", "JobName", "User", "State", "Partition", "WorkDir",
+    "StdOut", "StdErr", "NodeList", "Submit", "Start", "End",
+)
+
+
+def parse_sacct_row(text: str) -> dict[str, str]:
+    """Parse a single -P (pipe-separated) sacct row into the dict shape that
+    parse_scontrol_show_job returns.  sacct's column names mostly differ from
+    scontrol's; we re-map a few so callers don't care which source fed us."""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return {}
+    parts = lines[0].split("|")
+    if len(parts) < len(_SACCT_FALLBACK_FIELDS):
+        return {}
+    raw = dict(zip(_SACCT_FALLBACK_FIELDS, parts))
+    # Translate sacct → scontrol naming so callers (e.g. log_tail._path_for_stream)
+    # work without changes.  sacct exposes "JobID" / "State"; scontrol uses
+    # "JobId" / "JobState".  StdOut/StdErr/WorkDir/JobName/Partition are identical.
+    return {
+        "JobId":     raw.get("JobID", ""),
+        "JobName":   raw.get("JobName", ""),
+        "UserId":    raw.get("User", ""),
+        "JobState":  raw.get("State", ""),
+        "Partition": raw.get("Partition", ""),
+        "WorkDir":   raw.get("WorkDir", ""),
+        "StdOut":    raw.get("StdOut", ""),
+        "StdErr":    raw.get("StdErr", ""),
+        "NodeList":  raw.get("NodeList", ""),
+        "SubmitTime": raw.get("Submit", ""),
+        "StartTime":  raw.get("Start", ""),
+        "EndTime":    raw.get("End", ""),
+    }
+
+
 async def fetch_job_info(job_id: str) -> dict[str, str]:
-    text = await _run(["scontrol", "show", "job", str(job_id)])
-    return parse_scontrol_show_job(text)
+    """Job info dict.  Prefers `scontrol show job` (richest source) and falls
+    back to `sacct` for completed jobs that slurmctld no longer holds in memory.
+    Returns an empty dict if both sources fail (caller should handle that).
+
+    The returned dict includes a synthetic `_source` key whose value is the
+    string `scontrol show job <id>` or the sacct command line used, so the
+    caller can show users where the data came from."""
+    scontrol_cmd = ["scontrol", "show", "job", str(job_id)]
+    try:
+        text = await _run(scontrol_cmd)
+    except RuntimeError:
+        # scontrol fails (typically: "Invalid job id specified") for jobs that
+        # have left the controller's memory.  Fall back to the accounting db.
+        sacct_cmd = [
+            "sacct", "-j", str(job_id), "-X", "-P", "-n",
+            "-o", ",".join(_SACCT_FALLBACK_FIELDS),
+        ]
+        text = await _run(sacct_cmd)
+        d = parse_sacct_row(text)
+        if d:
+            d["_source"] = " ".join(sacct_cmd)
+        return d
+    d = parse_scontrol_show_job(text)
+    if d:
+        d["_source"] = " ".join(scontrol_cmd)
+    return d
+
+
+async def fetch_job_script(job_id: str) -> str:
+    """Original batch script body.  Live jobs: `scontrol write batch_script
+    <id> -` (last arg `-` writes to stdout).  Completed jobs: falls back to
+    `sacct -j <id> --batch-script` (Slurm 20.11+)."""
+    try:
+        return await _run(["scontrol", "write", "batch_script", str(job_id), "-"])
+    except RuntimeError:
+        # sacct emits the script straight to stdout (no pipe-format header).
+        return await _run(["sacct", "-j", str(job_id), "--batch-script"])
+
+
+async def fetch_job_env(job_id: str) -> str:
+    """Environment variables snapshot at submission time.  Only available
+    for jobs slurmctld still has in memory (live or very recently completed).
+    Raises RuntimeError when Slurm doesn't have it — caller should treat that
+    as 'unavailable' rather than an error."""
+    return await _run(["scontrol", "getenvironment", str(job_id)])
 
 
 async def fetch_recent_jobs(
