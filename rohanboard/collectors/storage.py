@@ -98,12 +98,14 @@ def parse_df(text: str, label: str, path: str) -> StorageEntry | None:
         try:
             total = int(parts[-5])
             used = int(parts[-4])
+            avail = int(parts[-3])
         except ValueError:
             continue
         return StorageEntry(
             label=label,
             used_bytes=used,
             total_bytes=total,
+            avail_bytes=avail,
             source="df",
             path=path,
         )

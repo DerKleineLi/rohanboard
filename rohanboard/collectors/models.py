@@ -67,12 +67,23 @@ class StorageEntry:
     hard_limit_bytes: int | None = None   # quota only
     source: str = "df"          # "df" or "quota"
     path: str | None = None     # filesystem path (df) or device (quota)
+    # df's "Available" column — what the *current user* can actually allocate.
+    # Differs from `total_bytes - used_bytes` on filesystems with reserved-for-root
+    # blocks (typically ~5% of total). None means "unknown, fall back to subtraction".
+    avail_bytes: int | None = None
 
     @property
     def fraction(self) -> float:
         if self.total_bytes <= 0:
             return 0.0
         return min(self.used_bytes / self.total_bytes, 1.0)
+
+    @property
+    def free_bytes(self) -> int:
+        """Writable free space — uses df Avail when known, else total - used."""
+        if self.avail_bytes is not None:
+            return max(self.avail_bytes, 0)
+        return max(self.total_bytes - self.used_bytes, 0)
 
 
 @dataclass

@@ -116,7 +116,7 @@ class StorageBar(Widget):
         self.query_one(UsageBar).update_fraction(entry.fraction)
 
     def _usage_text(self) -> Text:
-        free_bytes = max(self.entry.total_bytes - self.entry.used_bytes, 0)
+        free_bytes = self.entry.free_bytes
         text = fat_bytes(free_bytes, self.entry.used_bytes, self.entry.total_bytes)
         if self.entry.source == "quota":
             text.append("  (soft quota)", style="dim")

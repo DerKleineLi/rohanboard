@@ -77,8 +77,7 @@ def _storage_by_node(storage: list[StorageEntry]) -> dict[str, dict[str, Storage
 def _storage_cell(entry: StorageEntry | None) -> Text:
     if entry is None:
         return Text("—", style="dim")
-    free = max(entry.total_bytes - entry.used_bytes, 0)
-    return fat_bytes(free, entry.used_bytes, entry.total_bytes)
+    return fat_bytes(entry.free_bytes, entry.used_bytes, entry.total_bytes)
 
 
 def _node_filter_record(n: Node, storage_map: dict[str, dict[str, StorageEntry]]) -> dict:
@@ -105,10 +104,10 @@ def _node_filter_record(n: Node, storage_map: dict[str, dict[str, StorageEntry]]
         "mem_free":    (n.mem_total_mb - n.mem_alloc_mb) * MB,
         "mem_alloc":   n.mem_alloc_mb * MB,
         "mem_total":   n.mem_total_mb * MB,
-        "ssd_free":    (ssd.total_bytes - ssd.used_bytes) if ssd else 0,
+        "ssd_free":    ssd.free_bytes if ssd else 0,
         "ssd_used":    ssd.used_bytes if ssd else 0,
         "ssd_total":   ssd.total_bytes if ssd else 0,
-        "hdd_free":    (hdd.total_bytes - hdd.used_bytes) if hdd else 0,
+        "hdd_free":    hdd.free_bytes if hdd else 0,
         "hdd_used":    hdd.used_bytes if hdd else 0,
         "hdd_total":   hdd.total_bytes if hdd else 0,
     }
@@ -155,8 +154,8 @@ _NODE_COLUMNS_RAW: tuple[tuple[str, str, int, str], ...] = (
     ("cpu",        "CPU (free/alloc/total)",     17, "triple"),   # "1376 / 432 / 1808"
     ("gpu",        "GPU (free/alloc/total)",     22, "triple"),   # "16 / 56 / 64 rtx_a6000"
     ("mem",        "Mem GiB (free/alloc/total)", 22, "triple"),   # "9593 / 6823 / 16415"
-    ("ssd",        "SSD (free/alloc/total)",     26, "triple"),   # "139.4 / 727.2 / 866.6 GiB"
-    ("hdd",        "HDD (free/alloc/total)",     26, "triple"),
+    ("ssd",        "SSD (free/alloc/total)",     32, "triple"),   # per-value units: "289 GiB / 39.3 TiB / 41.7 TiB"
+    ("hdd",        "HDD (free/alloc/total)",     32, "triple"),
     ("partitions", "Partitions",                 15, "simple"),
 )
 
@@ -208,7 +207,7 @@ def _node_sort_key(
         if entry is None:
             return (float("-inf"), name_lower)
         value = {
-            "free":  entry.total_bytes - entry.used_bytes,
+            "free":  entry.free_bytes,
             "alloc": entry.used_bytes,
             "total": entry.total_bytes,
         }[metric]

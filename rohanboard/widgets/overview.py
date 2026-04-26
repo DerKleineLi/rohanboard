@@ -63,8 +63,7 @@ class HomeStorage(Widget):
             usage_line.update("[dim italic]no quota info yet[/dim italic]")
             return
         bar.update_fraction(home.fraction)
-        free = max(home.total_bytes - home.used_bytes, 0)
-        text = fat_bytes(free, home.used_bytes, home.total_bytes)
+        text = fat_bytes(home.free_bytes, home.used_bytes, home.total_bytes)
         text.append("  (soft quota)", style="dim")
         usage_line.update(text)
 
