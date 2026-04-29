@@ -585,16 +585,18 @@ class NodesSummary(Widget):
         cpu_free = t["cpu_total"] - t["cpu_alloc"]
         mem_free = t["mem_total"] - t["mem_alloc"]
 
-        ssd_total = ssd_used = 0
-        hdd_total = hdd_used = 0
+        ssd_total = ssd_used = ssd_free = 0
+        hdd_total = hdd_used = hdd_free = 0
         for e in snapshot.storage:
             p = (e.path or "").rstrip("/")
             if p.startswith("/cluster_HDD/") and p.count("/") == 2:
                 hdd_total += e.total_bytes
                 hdd_used += e.used_bytes
+                hdd_free += e.free_bytes
             elif p.startswith("/cluster/") and p.count("/") == 2:
                 ssd_total += e.total_bytes
                 ssd_used += e.used_bytes
+                ssd_free += e.free_bytes
 
         # Only fall back to the compact format when the panel itself is
         # really narrow.  Threshold kept well below half of OverviewPanel's
@@ -642,11 +644,11 @@ class NodesSummary(Widget):
         out.append("\n")
         if ssd_total:
             out.append("SSD   ")
-            out.append_text(fat_bytes(ssd_total - ssd_used, ssd_used, ssd_total))
+            out.append_text(fat_bytes(ssd_free, ssd_used, ssd_total))
             out.append("\n")
         if hdd_total:
             out.append("HDD   ")
-            out.append_text(fat_bytes(hdd_total - hdd_used, hdd_used, hdd_total))
+            out.append_text(fat_bytes(hdd_free, hdd_used, hdd_total))
             out.append("\n")
         out.append("GPU\n")
         for kind, (a, tot) in sorted(t["gpus"].items()):

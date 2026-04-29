@@ -30,4 +30,7 @@ def test_parse_df_first_mount():
     # First data row in fixture is /cluster/balar with 45 TB total.
     assert entry.total_bytes == 45847312072704
     assert entry.used_bytes == 43514124566528
+    # df Available is far smaller than total - used on this fs (reserved blocks).
+    assert entry.avail_bytes == 31591497728
+    assert entry.free_bytes == 31591497728
     assert entry.fraction > 0.94
