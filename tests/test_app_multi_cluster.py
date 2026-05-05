@@ -516,6 +516,54 @@ async def test_ssh_executor_preflight_check_skipped_when_not_warm():
     assert ex._master_ready is True
 
 
+@pytest.mark.asyncio
+async def test_ssh_executor_kills_subprocess_on_cancellation():
+    """When the awaiting task is cancelled (e.g. `run_worker(exclusive=True)`
+    cancels the previous tick because a new one started), `.run` MUST
+    kill+reap the subprocess.  Otherwise the OS-level ssh proc leaks and
+    next tick's call stacks behind it — the slurm-quota pile-up bug."""
+    import asyncio as _asyncio
+
+    killed: list[bool] = []
+    waited: list[bool] = []
+
+    class HangProc:
+        returncode = None
+
+        async def communicate(self):
+            # Hang forever; rely on cancellation to break us out.
+            await _asyncio.sleep(3600)
+            return (b"", b"")
+
+        def kill(self):
+            killed.append(True)
+            # Simulate the kernel reaping; pretend the proc died.
+            self.returncode = -9
+
+        async def wait(self):
+            waited.append(True)
+            return -9
+
+    async def fake_create(*args, **kwargs):
+        return HangProc()
+
+    ex = SSHExecutor(host="cancel-host")
+    ex._master_ready = True  # bypass warm
+
+    with patch("rohanboard.exec.asyncio.create_subprocess_exec", new=fake_create):
+        task = _asyncio.create_task(ex.run(["echo", "hi"], timeout=60.0))
+        await _asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(_asyncio.CancelledError):
+            await task
+
+    assert killed == [True], "subprocess.kill() was not called on cancellation"
+    assert waited == [True], "subprocess.wait() was not called on cancellation"
+    # And the semaphore was released so the next caller can proceed.
+    assert ex._inflight is not None
+    assert ex._inflight._value == 1
+
+
 def test_mux_ctl_argv_uses_same_control_path():
     """`ssh -O check/exit` must use the SAME ControlPath as `.run` — else
     it'd be poking at a different (or non-existent) socket."""

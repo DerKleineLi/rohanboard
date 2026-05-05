@@ -47,11 +47,21 @@ class LocalExecutor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        # Catch ALL exceptions (TimeoutError + CancelledError) so subprocess
+        # is killed+reaped on cancel; otherwise the next tick keeps stacking
+        # ssh procs that the OS owns but python no longer awaits.
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+        except BaseException:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.shield(proc.wait())
+                except BaseException:
+                    pass
             raise
         if proc.returncode != 0:
             raise RuntimeError(
@@ -392,9 +402,16 @@ class SSHExecutor:
             )
             try:
                 out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+            except BaseException:
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.shield(proc.wait())
+                    except BaseException:
+                        pass
                 raise
             if proc.returncode != 0:
                 raise RuntimeError(
@@ -430,11 +447,25 @@ class SSHExecutor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            # Catch ALL exceptions (including asyncio.CancelledError from
+            # `run_worker(exclusive=True)` cancelling us, and TimeoutError
+            # from the wait_for) — must kill+reap the subprocess in every
+            # path or we leak ssh procs that hang on a slow remote and the
+            # next tick spawns yet another one (the slurm-quota stack-up).
             try:
                 out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+            except BaseException:
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    # Shield the wait so a subsequent cancellation can't skip
+                    # the reap and leave a zombie behind.
+                    try:
+                        await asyncio.shield(proc.wait())
+                    except BaseException:
+                        pass
                 raise
             if proc.returncode != 0:
                 raise RuntimeError(
