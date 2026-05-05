@@ -302,15 +302,40 @@ class OverviewPanel(Widget):
     #           + body(3 labels=3 + 3 sparks ≥1 each=3) = 12.  A bit more
     # for readable sparks:
     UTIL_MIN_HEIGHT = 13
-    # rough natural heights used only for deciding whether util fits
-    _TOTALS_NATURAL = 15
+    # NodesSummary fixed-overhead rows (everything that's NOT a GPU row):
+    #   border(2) + padding_top(1) + title(1) + Nodes(1) + CPU(1) + Mem(1)
+    #   + maybe SSD(1) + maybe HDD(1) + "GPU" header(1) + padding_bot(1)
+    # Worst-case (both SSD+HDD present) = 11. We add `len(GPU rows)` on top
+    # and some slack for wrapping. See `_compute_totals_natural`.
+    _TOTALS_FIXED_OVERHEAD = 11
+    _TOTALS_GPU_SLACK = 1
+    _TOTALS_MIN = 8     # never report less than this — a typical small cluster
     _HOME_NATURAL = 7
 
     def __init__(self) -> None:
         super().__init__()
         self._job_count = 0
+        self._gpu_row_count = 0   # number of distinct GPU rows in latest snapshot
+        self._has_ssd = False
+        self._has_hdd = False
         self._last_layout: tuple | None = None
         self._ascii_budget = 0
+
+    def _totals_natural(self) -> int:
+        """Compute NodesSummary's natural height from the latest snapshot.
+
+        Replaces the old hardcoded `_TOTALS_NATURAL = 15`. The GPU section
+        size varies a lot between clusters: rohan (~5 GPU kinds) vs LRZ
+        (H100 + A100-80 + A100-40 + V100 + 3 MIG profiles = 7 rows). With
+        a fixed 15 the LRZ overview's Home pane bottom got painted over
+        by the ASCII pane below.
+        """
+        ssd = 1 if self._has_ssd else 0
+        hdd = 1 if self._has_hdd else 0
+        # Fixed overhead minus whichever storage rows are absent.
+        base = self._TOTALS_FIXED_OVERHEAD - (1 - ssd) - (1 - hdd)
+        gpu_rows = self._gpu_row_count + self._TOTALS_GPU_SLACK
+        return max(base + gpu_rows, self._TOTALS_MIN)
 
     def compose(self) -> ComposeResult:
         with ScrollableContainer(id="root"):
@@ -328,6 +353,23 @@ class OverviewPanel(Widget):
         # Overview's job pane shows mine-only — drive layout decisions off
         # that count, not the (possibly all-users) Jobs-tab list.
         self._job_count = len(snap.jobs_mine)
+        # Recompute NodesSummary natural height from the snapshot — the GPU
+        # row count varies per cluster (LRZ has H100 + A100-80 + A100-40 +
+        # V100 + MIG profiles, rohan has fewer). Hardcoding 15 caused the
+        # LRZ Home pane bottom to be painted over by the ASCII pane below.
+        gpu_kinds: set[str] = set()
+        for n in snap.nodes:
+            for g in n.gpus:
+                lbl = g.display
+                if lbl != "—":
+                    gpu_kinds.add(lbl)
+        self._gpu_row_count = len(gpu_kinds)
+        self._has_ssd = any(
+            (e.path or "").startswith("/cluster/") for e in snap.storage
+        )
+        self._has_hdd = any(
+            (e.path or "").startswith("/cluster_HDD/") for e in snap.storage
+        )
         # re-layout may be needed if util fit-check flipped
         self._relayout()
         self._push_snapshot()
@@ -352,7 +394,7 @@ class OverviewPanel(Widget):
             mode = "narrow"
             # NodesSummary uses its full multiline format unless really
             # cramped (<60 cols), so size for the full form here.
-            totals_h = 6 if w < 60 else self._TOTALS_NATURAL
+            totals_h = 6 if w < 60 else self._totals_natural()
             natural_need = totals_h + 1 + self._HOME_NATURAL + 1 + jobs_nat
             util_side = None
             # Narrow mode flips to vertical scroll-the-page when the stack
@@ -360,7 +402,7 @@ class OverviewPanel(Widget):
             fit = natural_need <= h
         else:
             mode = "wide"
-            left_nat = self._TOTALS_NATURAL + 1 + self._HOME_NATURAL
+            left_nat = self._totals_natural() + 1 + self._HOME_NATURAL
             # Cap the right column's "natural" demand to the window height —
             # CompactJobs has an internal VerticalScroll, so when it's given
             # the right column at flex(1fr) its body just scrolls.  Without
