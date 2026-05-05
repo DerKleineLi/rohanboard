@@ -37,6 +37,19 @@ log = logging.getLogger(__name__)
 class Executor(Protocol):
     async def run(self, argv: list[str], timeout: float = 15.0) -> str: ...
 
+    async def whoami(self) -> str:
+        """Return the username on the executor's target.
+
+        For LocalExecutor this is `$USER`; for SSHExecutor this issues
+        `whoami` against the remote (cached after the first call) so the
+        CLUSTER's user is detected — not the local $USER. This generalises
+        the LRZ "Invalid user id: hli" failure: rohan happens to share the
+        WSL username `hli`, but LRZ's user is `di35dob` etc. Callers that
+        construct argv with `-u <user>` (squeue/sacct) or `~user/...`
+        path expansions MUST go through this helper, not `os.environ`.
+        """
+        ...
+
 
 class LocalExecutor:
     """Runs argv locally via asyncio.create_subprocess_exec, returns stdout."""
@@ -47,12 +60,14 @@ class LocalExecutor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        cancelled = False
         # Catch ALL exceptions (TimeoutError + CancelledError) so subprocess
         # is killed+reaped on cancel; otherwise the next tick keeps stacking
         # ssh procs that the OS owns but python no longer awaits.
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except BaseException:
+            cancelled = True
             if proc.returncode is None:
                 try:
                     proc.kill()
@@ -63,11 +78,15 @@ class LocalExecutor:
                 except BaseException:
                     pass
             raise
-        if proc.returncode != 0:
+        if proc.returncode != 0 and not cancelled:
             raise RuntimeError(
                 f"command {argv!r} failed rc={proc.returncode}: {err.decode(errors='replace')[:500]}"
             )
         return out.decode(errors="replace")
+
+    async def whoami(self) -> str:
+        """Return the local username. For LocalExecutor this is just $USER."""
+        return os.environ.get("USER", "")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -238,6 +257,14 @@ class SSHExecutor:
         # blocks the next dispatch; the caller times out cleanly and surfaces
         # "stale" rather than stacking dispatches.
         self._inflight: asyncio.Semaphore | None = None
+
+        # Cached remote username — populated lazily on first `whoami()` call.
+        # Generalises the LRZ user-resolution bug: `os.environ["USER"]` is
+        # the WSL user (hli), which is wrong for any cluster whose login
+        # name differs (LRZ → di35dob). Callers that need `-u <user>` or
+        # `~user/...` MUST go through `await executor.whoami()`.
+        self._remote_user: str | None = None
+        self._whoami_lock: asyncio.Lock | None = None
 
         # Register for at-shutdown cleanup.
         with _REGISTRY_LOCK:
@@ -447,6 +474,7 @@ class SSHExecutor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            cancelled = False
             # Catch ALL exceptions (including asyncio.CancelledError from
             # `run_worker(exclusive=True)` cancelling us, and TimeoutError
             # from the wait_for) — must kill+reap the subprocess in every
@@ -455,6 +483,7 @@ class SSHExecutor:
             try:
                 out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except BaseException:
+                cancelled = True
                 if proc.returncode is None:
                     try:
                         proc.kill()
@@ -467,7 +496,12 @@ class SSHExecutor:
                     except BaseException:
                         pass
                 raise
-            if proc.returncode != 0:
+            # Suppress rc=255 when the subprocess was killed by us: OpenSSH
+            # exits 255 when the channel is torn down mid-flight (kill-by-
+            # parent counts), and surfacing that as "ssh failed rc=255"
+            # caused user-visible spurious errors during the cancel storm
+            # (`run_worker(exclusive=True)` cancelling overlong ticks).
+            if proc.returncode != 0 and not cancelled:
                 raise RuntimeError(
                     f"ssh {self.host} {argv!r} failed rc={proc.returncode}: "
                     f"{err.decode(errors='replace')[:500]}"
@@ -475,3 +509,38 @@ class SSHExecutor:
             return out.decode(errors="replace")
         finally:
             self._inflight.release()
+
+    async def whoami(self) -> str:
+        """Return the REMOTE username on this ssh host (cached).
+
+        First call issues `whoami` against the remote; subsequent calls
+        return the cached value. Cleared automatically when the master is
+        torn down (so a different user could in principle reconnect, but
+        in practice the ssh config pins the user per host).
+
+        The cache survives across mux re-warms within a single
+        SSHExecutor lifetime — `whoami` against the same host always
+        returns the same string.
+        """
+        if self._remote_user is not None:
+            return self._remote_user
+        if self._whoami_lock is None:
+            self._whoami_lock = asyncio.Lock()
+        async with self._whoami_lock:
+            if self._remote_user is not None:
+                return self._remote_user
+            # Use a short timeout — `whoami` is a no-op shell builtin once
+            # the mux is warm. If the master isn't warm yet, .run will
+            # warm it; that path is already bounded by max(timeout, 30s).
+            try:
+                out = await self.run(["whoami"], timeout=10.0)
+            except RuntimeError:
+                # If whoami fails (rare; would need the remote shell itself
+                # to be broken), fall back to local $USER. Better than
+                # raising — callers can still proceed and the resulting
+                # `-u <user>` will produce a clean "Invalid user id" rather
+                # than a hard crash.
+                self._remote_user = os.environ.get("USER", "")
+                return self._remote_user
+            self._remote_user = out.strip()
+            return self._remote_user

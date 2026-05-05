@@ -269,12 +269,31 @@ def parse_scontrol_show_node(text: str) -> list[Node]:
 # ──────────────────────────────────────────────────────────────────────────
 
 
+async def _resolve_self(executor: Executor, users: list[str]) -> list[str]:
+    """Replace `self` tokens with the executor's REMOTE username.
+
+    Was `os.environ["USER"]` — but on LRZ the WSL user (hli) doesn't exist
+    remotely, producing `sacct: Invalid user id: hli` and silent 1.5 s/tick
+    eats. The executor caches the result of `whoami` on first call so this
+    is a single-RTT cost amortised over the lifetime of the executor.
+
+    Defensive fallback: if the executor doesn't expose `whoami` (older
+    test stubs), fall back to `$USER` — same behaviour as before.
+    """
+    if "self" not in users:
+        return [u for u in users if u]
+    if hasattr(executor, "whoami"):
+        me = await executor.whoami()
+    else:
+        me = os.environ.get("USER", "")
+    return [me if u == "self" else u for u in users if (me if u == "self" else u)]
+
+
 async def fetch_jobs(executor: Executor, users: list[str] | None = None) -> list[Job]:
     """`users=['self']` → current user only; ['all'] or None → all users."""
     args = ["squeue", "-h", "-O", SQUEUE_O_FORMAT]
     if users and "all" not in users:
-        resolved = [os.environ.get("USER", "") if u == "self" else u for u in users]
-        resolved = [u for u in resolved if u]
+        resolved = await _resolve_self(executor, users)
         if resolved:
             args += ["-u", ",".join(resolved)]
     text = await executor.run(args)
@@ -424,8 +443,7 @@ async def fetch_recent_jobs(
 ) -> list[Job]:
     args = ["sacct", "-X", "-P", "-n", f"--starttime={starttime}", "-o", SACCT_FORMAT]
     if users and "all" not in users:
-        resolved = [os.environ.get("USER", "") if u == "self" else u for u in users]
-        resolved = [u for u in resolved if u]
+        resolved = await _resolve_self(executor, users)
         if resolved:
             args += ["-u", ",".join(resolved)]
     else:

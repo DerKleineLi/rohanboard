@@ -73,7 +73,15 @@ async def fetch_quota(
     filesystem: str | None,
     user: str | None = None,
 ) -> StorageEntry | None:
-    user = user or os.environ.get("USER", "")
+    # Use the executor's REMOTE username via whoami (cached) — falls back to
+    # local $USER only when the executor doesn't expose `whoami` (e.g. an
+    # old test stub). Without this fix, ssh:lrz called `quota -u hli`
+    # against a host whose user is `di35dob` → "Invalid user id".
+    if user is None:
+        if hasattr(executor, "whoami"):
+            user = await executor.whoami()
+        else:
+            user = os.environ.get("USER", "")
     if not user:
         return None
     # `quota` returns non-zero when the user is over quota — the stdout payload
