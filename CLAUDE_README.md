@@ -105,3 +105,48 @@
 - `StorageEntry.free_bytes` returns df's `Available` column when set (i.e. **excludes reserved-for-root blocks**, ~5% on ext, but can be 100x on full filesystems with strict reservations like the cluster's balar). Falls back to `total - used` only for quota entries (no avail).
 - The per-node Nodes table (`widgets/nodes_table.py:_storage_cell`) renders `entry.free_bytes` — the writable amount.
 - The Cluster totals card (`widgets/nodes_table.py:NodesSummary.update_snapshot`) must aggregate `e.free_bytes` per mount, **not** `total_bytes - used_bytes`. Otherwise the totals card overstates free by gigabytes-to-terabytes vs. what the table shows. Fixed 2026-04-29.
+
+## 8-issue review fixes (since 2026-05-05)
+
+### `ssh:slurm` is wrong for monitoring rohan — use `ssh:rohan` (#7)
+- `ssh slurm` is the *sshd-job on a compute node* (per `reference_rohan_workflow.md`); it can't see most of `/cluster/`, can't see `/cluster_HDD/` at all, and `quota` errors out (`No such file: /local/aquota.user`).
+- For rohanboard monitoring, `exec` MUST point to a head/login node. The WSL multi-config at `/tmp/wsl_multi_config.toml` was patched to `exec = "ssh:rohan"` on 2026-05-05.
+- The `slurm` alias is still the right ssh target for *executing* sbatch / interactive work — but NOT a data source for rohanboard.
+
+### Coalesce per-host data into one ssh round-trip per refresh tick (#1)
+- `Semaphore(1)` per host is correct (wedge protection). Don't widen it. Fix interaction lag at the COLLECTOR layer: gather all needed paths, then make ONE `df -B1 path1 path2 ... pathN` call (or analog).
+- `collectors/storage.fetch_df_multi(executor, [(label, path), ...])` is the canonical helper. `parse_df_multi(text, paths)` demuxes the multi-row output, walking up the path tree to the actual mount when df reports a parent directory.
+- Two consumers updated: `app._grab_storage_impl` for `kind == "auto"` (rohan) and `discover_lrz_storage` for LRZ home/scratch/containers. Refresh tick on rohan dropped from ~24×RTT to 1×RTT.
+- Pattern generalises: ANY future per-host data (sinfo-by-partition, scontrol-show-job batch, etc.) should follow "collector batches paths/items, executor runs once". Don't sidestep the semaphore.
+
+### MIG nodes aggregate at node level — no per-profile alloc (#5)
+- Slurm's AllocTRES exposes only ONE flat `gres/gpu=N` for a MIG node. There is NO per-profile breakdown of which slices are allocated. Per-profile alloc numbers are FICTITIOUS.
+- Detection (in `collectors/slurm._parse_node_block`): `len(gres_entries) >= 2` AND any kind matches `<N>g.<M>gb` (`_MIG_PROFILE_RE`).
+- For MIG nodes, emit ONE synthetic GpuSpec at node level: `kind = "MIG (3g.40gb+2g.20gb+1g.10gb)"`, `total = sum of profile counts`, `alloc = AllocTRES gres/gpu`. Loses per-profile counts but stops producing negative free numbers in cluster totals.
+- Non-MIG path (rohan classic, plain H100/A100/V100) is unchanged — single Gres entry, alloc attributed to it directly, vram from AvailableFeatures.
+- See saved memory `feedback_slurm_mig_alloctres_flat.md` for the underlying rule.
+
+### LRZ avail must cap at quota headroom (#6)
+- When `dssusrinfo` quota overrides `total_bytes`, df's `avail_bytes` is the FILESYSTEM-WIDE free space (e.g. /dss/dsshome1 = 317 TiB) — pairing it with a 100 GB quota produces `free 317 TiB / total 100 GB` nonsense.
+- `discover_lrz_storage` now caps `avail = min(df_avail, max(0, quota_total - quota_used))`. Same rule for home and DSS containers. When df returns nothing, fall back to pure quota headroom (was None previously).
+
+### Overview NodesSummary natural height comes from the snapshot (#4)
+- `OverviewPanel._TOTALS_NATURAL = 15` was rohan-tuned. LRZ has 7 distinct GPU kinds (H100 + A100-80 + A100-40 + V100 + 3 MIG profiles) → real card height ~20. The undersized constant let `#ascii_row` paint over the bottom of HomeStorage.
+- Replace with `_totals_natural()`: derives `_TOTALS_FIXED_OVERHEAD - 1*(no SSD) - 1*(no HDD) + gpu_row_count + slack`. `update_snapshot` counts distinct `GpuSpec.display` labels and tracks SSD/HDD presence.
+- General Textual rule: don't hardcode "natural" heights for content that depends on snapshot data. Compute from data, OR use `height: auto` in CSS and let Textual size from content.
+
+### GPU column format: `<free/alloc/total> <kind+vram>` (#2)
+- Numbers first, label second — both per-row (`_gpu_cell`) and in NodesSummary GPU rows. Numbers are the load-bearing data and must align across rows.
+
+### Nodes tab also mounts `nodes_summary` above `nodes_table` (#8)
+- `config._default_layout` includes `["nodes_summary", "nodes_table"]` for the Nodes tab. Cluster totals are now visible BOTH in Overview (inside OverviewPanel) and at the top of the Nodes tab.
+
+### Recent change log
+- `4cde47a` slurm: MIG node-level aggregation
+- `68cde1f` overview: dynamic NodesSummary natural height
+- `c7eea4f` storage: coalesce df into one round-trip
+- `34b1f9c` storage: cap LRZ avail at quota headroom
+- `d70f5d7` nodes: mount nodes_summary in Nodes tab default layout
+- `a5f2f26` nodes: GPU column triple-first ordering
+- `800459d` checkpoint: multi-cluster (steps 2/3/4) + LRZ storage WIP
+- (config-only, not in git) `/tmp/wsl_multi_config.toml` rohan exec → `ssh:rohan` (#7)
