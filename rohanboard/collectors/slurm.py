@@ -45,6 +45,9 @@ _KV_RE = re.compile(r"\b([A-Za-z_]+)=(\S+)")
 # MIG profiles like `3g.20gb` parse cleanly.
 _GRES_GPU_RE = re.compile(r"gpu:(?:([A-Za-z0-9_.]+):)?(\d+)(?:\(S:[^)]+\))?")
 _ALLOC_GPU_RE = re.compile(r"gres/gpu=(\d+)")
+# MIG profile shape: digit + 'g.' + digit(s) + 'gb' (case-insensitive).
+# Example: 3g.40gb, 2g.20gb, 1g.10gb, 7g.80gb, 4g.20gb.
+_MIG_PROFILE_RE = re.compile(r"^\d+g\.\d+gb$", re.IGNORECASE)
 # AvailableFeatures encodes <kind>-<vram> on LRZ for GPU nodes
 # (e.g. H100-92GB, A100-80GB, A100-40GB, V100-16GB, P100-16GB).
 # CPU nodes use CPU-350GB / CPU-AMD / CPU-1.7TB — these must NOT be
@@ -164,35 +167,60 @@ def _parse_node_block(block: str) -> Node | None:
             feat_vram = m_feat.group(2)
             break
 
+    raw_gres = _GRES_GPU_RE.findall(gres_str)
+    # Detect a MIG node: 2+ comma-separated gpu entries OR any kind that
+    # matches the MIG profile shape `<N>g.<M>gb`. Per
+    # feedback_slurm_mig_alloctres_flat.md, slurm's AllocTRES exposes only
+    # ONE flat `gres/gpu=N` for the whole MIG node — there is NO per-
+    # profile alloc breakdown. Naively attributing all alloc to the first
+    # profile produces fictitious -N free counts.
+    is_mig = (
+        len(raw_gres) >= 2
+        and any(_MIG_PROFILE_RE.match(k) for k, _ in raw_gres if k)
+    )
+
     gpus: list[GpuSpec] = []
-    for kind, total in _GRES_GPU_RE.findall(gres_str):
-        # All allocated GPUs on rohan nodes are of the node's single GPU kind,
-        # so attribute the alloc count to the first (and only) entry.
-        alloc = alloc_gpu_total if not gpus else 0
-        # Resolution order for kind/vram:
-        #  1. Gres `gpu:KIND:N` (rohan classic, MIG profiles): kind from Gres,
-        #     vram=None unless AvailableFeatures gives a sibling vram.
-        #  2. Gres `gpu:N(S:...)` (LRZ classic, no kind): kind+vram from
-        #     AvailableFeatures match.
-        if kind:
-            # Gres carried a kind; prefer it. If AvailableFeatures has a
-            # vram match for a *matching* kind (case-insensitive), keep
-            # vram too — otherwise leave vram=None to avoid mislabeling
-            # MIG profiles.
-            resolved_kind = kind
-            resolved_vram: str | None = None
-            if feat_kind and feat_kind.lower() == kind.lower() and feat_vram:
-                resolved_vram = feat_vram
-        else:
-            # Gres lacks kind — fall back to AvailableFeatures.
-            resolved_kind = feat_kind or ""
-            resolved_vram = feat_vram
+    if is_mig:
+        # Aggregate at node level: ONE GpuSpec representing all MIG slices,
+        # with kind = "MIG (<profile1>+<profile2>+...)" and total = sum of
+        # profile counts. alloc is the flat `gres/gpu=N` from AllocTRES —
+        # accurate at node level even though slurm doesn't break it down
+        # per profile.
+        profiles = [k for k, _ in raw_gres if k]
+        total_slices = sum(int(t) for _, t in raw_gres)
+        kind_label = "MIG (" + "+".join(profiles) + ")" if profiles else "MIG"
         gpus.append(GpuSpec(
-            kind=resolved_kind,
-            total=int(total),
-            alloc=alloc,
-            vram=resolved_vram,
+            kind=kind_label,
+            total=total_slices,
+            alloc=alloc_gpu_total,
+            vram=None,
         ))
+    else:
+        for kind, total in raw_gres:
+            # All allocated GPUs on a non-MIG node are of the node's single
+            # GPU kind, so attribute the alloc count to the first (and only)
+            # entry.
+            alloc = alloc_gpu_total if not gpus else 0
+            # Resolution order for kind/vram:
+            #  1. Gres `gpu:KIND:N` (rohan classic): kind from Gres,
+            #     vram=None unless AvailableFeatures gives a sibling vram.
+            #  2. Gres `gpu:N(S:...)` (LRZ classic, no kind): kind+vram
+            #     from AvailableFeatures match.
+            if kind:
+                resolved_kind = kind
+                resolved_vram: str | None = None
+                if feat_kind and feat_kind.lower() == kind.lower() and feat_vram:
+                    resolved_vram = feat_vram
+            else:
+                # Gres lacks kind — fall back to AvailableFeatures.
+                resolved_kind = feat_kind or ""
+                resolved_vram = feat_vram
+            gpus.append(GpuSpec(
+                kind=resolved_kind,
+                total=int(total),
+                alloc=alloc,
+                vram=resolved_vram,
+            ))
 
     try:
         cpu_load = float(fields["CPULoad"]) if fields.get("CPULoad", "N/A") != "N/A" else None

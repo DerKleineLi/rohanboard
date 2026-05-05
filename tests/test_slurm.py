@@ -138,3 +138,78 @@ def test_parse_node_rohan_a6000():
     assert g.total == 8
     assert g.alloc == 8
     assert g.display == "rtx_a6000"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Issue #5 — MIG node aggregation at NODE level
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_parse_node_lrz_mig_aggregates_at_node_level():
+    """MIG node with mixed profiles: AllocTRES gives ONE flat gres/gpu=N
+    for the whole node — slurm doesn't break out per profile. We must
+    emit ONE GpuSpec at node level, not one per profile.
+
+    Before the fix, the parser attributed all alloc to the FIRST profile,
+    producing fictitious -2 free per node and -6 free at cluster level
+    when 3 such nodes were summed.
+    """
+    n = _one_node("lrz_node_mig.txt")
+    assert n.name == "mcml-hgx-a100-019"
+    # Single synthetic GpuSpec covering all MIG slices on the node.
+    assert len(n.gpus) == 1, (
+        f"MIG node must produce exactly one GpuSpec at node level, "
+        f"got {len(n.gpus)}: {[g.kind for g in n.gpus]}"
+    )
+    g = n.gpus[0]
+    # Total = sum of profile counts: 4 (3g.40gb) + 4 (2g.20gb) + 8 (1g.10gb) = 16.
+    assert g.total == 16
+    # Alloc = AllocTRES gres/gpu=6 — the flat sum slurm reports.
+    assert g.alloc == 6
+    # Free is non-negative (the bug repro: -6 free at cluster level).
+    assert g.free == 10, f"free must equal total-alloc=10, got {g.free}"
+    # Kind label preserves which profiles were on the node so the user
+    # can see "MIG (3g.40gb+2g.20gb+1g.10gb)".
+    assert "3g.40gb" in g.kind
+    assert "2g.20gb" in g.kind
+    assert "1g.10gb" in g.kind
+    assert g.kind.startswith("MIG")
+
+
+def test_parse_node_non_mig_h100_unchanged():
+    """Issue #5 regression: the non-MIG path must keep its old behaviour."""
+    n = _one_node("lrz_node_h100.txt")
+    # H100: single Gres `gpu:4(S:0-1)` — NOT MIG. Per-profile attribution
+    # is valid because there's only one profile. This test guards against
+    # a regression that would treat any GPU node as MIG.
+    assert len(n.gpus) == 1
+    g = n.gpus[0]
+    assert g.kind == "H100"
+    assert g.vram == "92GB"
+    assert g.total == 4
+
+
+def test_cluster_totals_across_mixed_mig_and_non_mig_nodes():
+    """Aggregating across a mixed cluster (MIG node + non-MIG H100) must
+    NOT produce negative free counts on any row. Prior to fix, the MIG
+    profile rows summed alloc=18 vs total=12 → free=-6 cluster-wide."""
+    from rohanboard.widgets.nodes_table import _cluster_totals
+
+    mig = _one_node("lrz_node_mig.txt")
+    h100 = _one_node("lrz_node_h100.txt")
+    a100_80 = _one_node("lrz_node_a100_80.txt")
+    # 3 identical MIG nodes (the actual LRZ cluster has 3) plus one each
+    # of H100 and A100-80.
+    nodes = [mig, mig, mig, h100, a100_80]
+    totals = _cluster_totals(nodes)
+    for label, (alloc, total) in totals["gpus"].items():
+        free = total - alloc
+        assert free >= 0, (
+            f"row {label!r} has negative free: {free} (alloc={alloc} total={total})"
+        )
+    # MIG row should aggregate: 3 nodes × 16 slices total = 48, 3 × 6 alloc = 18.
+    mig_rows = [k for k in totals["gpus"] if k.startswith("MIG")]
+    assert len(mig_rows) == 1, f"all 3 MIG nodes should aggregate to one row, got {mig_rows}"
+    mig_alloc, mig_total = totals["gpus"][mig_rows[0]]
+    assert mig_total == 48
+    assert mig_alloc == 18

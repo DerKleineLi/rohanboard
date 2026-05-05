@@ -1,0 +1,15 @@
+NodeName=mcml-hgx-a100-019 Arch=x86_64 CoresPerSocket=44
+   CPUAlloc=88 CPUEfctv=88 CPUTot=88 CPULoad=2.34
+   AvailableFeatures=A100-80GB
+   ActiveFeatures=A100-80GB
+   Gres=gpu:3g.40gb:4(S:0-1),gpu:2g.20gb:4(S:0-1),gpu:1g.10gb:8(S:0-1)
+   NodeAddr=mcml-hgx-a100-019 NodeHostName=mcml-hgx-a100-019 Version=24.05.3
+   OS=Linux 5.15.0-1098-nvidia
+   RealMemory=515600 AllocMem=491520 FreeMem=23200 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=mcml-hgx-a100-80x4-mig
+   BootTime=2026-04-30T10:09:11 SlurmdStartTime=2026-04-30T10:10:21
+   LastBusyTime=2026-05-05T06:53:45 ResumeAfterTime=None
+   CfgTRES=cpu=88,mem=480G,billing=3996312,gres/gpu=16
+   AllocTRES=cpu=88,mem=480G,gres/gpu=6
+   CurrentWatts=0 AveWatts=0
