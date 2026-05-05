@@ -267,17 +267,37 @@ class OverviewPanel(Widget):
     OverviewPanel.scroll .card { margin-bottom: 0; }
     OverviewPanel #ascii_row.hidden { display: none; }
 
-    /* ── WIDE + fit: 2-col grid, equal-height cols, one flex card each ── */
+    /* ── WIDE + fit: 2-col grid, content-sized cols, ASCII absorbs slack ──
+       The 2026-05-05 layout fix.  Was: `grid-rows: 1fr` + imperative
+       height = max(left_nat, right_nat).  Problem: Util card's flex=true
+       inside the right column pushed the SHARED row height past the
+       imperative target, leaving the LEFT column shorter than its
+       allocation → 1–3 row gap below HomeStorage and above the ASCII pane.
+
+       Fix: drop `grid-rows: 1fr` and the imperative height — let each
+       column size to its natural content (no shared row).  The ASCII
+       pane below #main is still `1fr`, so it absorbs whatever vertical
+       slack remains regardless of which column is taller.  No more gap
+       inside #main; the slack is always at the bottom (where ASCII
+       lives), which is where it should be. */
     OverviewPanel.wide.fit #main {
         layout: grid;
         grid-size: 2;
         grid-gutter: 0 1;
-        grid-rows: 1fr;
-        height: auto;          /* set imperatively to target rows */
+        height: auto;
         min-height: 0;
     }
-    OverviewPanel.wide.fit #main > .col { layout: vertical; height: 100%; }
-    OverviewPanel.wide.fit #main > .col > .card.flex { height: 1fr; }
+    OverviewPanel.wide.fit #main > .col {
+        layout: vertical;
+        height: auto;
+    }
+    /* Inside fit mode, no card stretches — they all sit at natural
+       height and the ASCII pane below absorbs the slack. The widget-
+       level DEFAULT_CSS on UtilizationPanel et al sets `height: 1fr`
+       (a holdover from the OLD shared-row layout); we override that
+       here AND we also clear `.flex` imperatively in _populate when
+       in fit mode (textual widget-class CSS otherwise wins). */
+    OverviewPanel.wide.fit #main > .col > .card.flex { height: auto; }
 
     /* ── NARROW or scroll: stack at natural heights ─────────────────── */
     OverviewPanel.narrow #main, OverviewPanel.scroll #main {
@@ -458,10 +478,14 @@ class OverviewPanel(Widget):
             self.remove_class(cls)
         self.add_class(mode)
         self.add_class("fit" if fit else "scroll")
-        if fit and mode == "wide":
-            main.styles.height = target
-        else:
-            main.styles.height = None
+        # No imperative height anymore — fit mode lets #main size to its
+        # natural content (height: auto in CSS) and #ascii_row at 1fr
+        # absorbs the remaining vertical slack. The previous imperative
+        # `main.styles.height = target = max(left_nat, right_nat)` was
+        # the root cause of the 1–3 row gap below HomeStorage on rohan:
+        # the right column's flex Util card pushed shared row height
+        # past target, leaving the left column under-filled.
+        main.styles.height = None
 
         if mode == "narrow":
             # Single col, all natural — overflow handled by parent scroll.
@@ -475,29 +499,40 @@ class OverviewPanel(Widget):
             main.mount(col_left)
             main.mount(col_right)
 
+            # In wide+fit mode the columns are CONTENT-SIZED — no card
+            # stretches; ASCII pane below (`#ascii_row` at `1fr`) absorbs
+            # the slack.  UtilizationPanel's DEFAULT_CSS sets `height:
+            # 1fr` at the widget-class level (designed for the OLD
+            # shared-row layout) — we bound it imperatively to a fixed
+            # natural height (UTIL_MIN_HEIGHT = 13) so the column it
+            # lives in remains content-sized.  Util is shown only when
+            # there's enough vertical slack on the SHORTER column to
+            # accommodate it (util_side decision elsewhere).
             col_left.mount(_card(NodesSummary()))
             if util_side == "left":
                 col_left.mount(_card(HomeStorage()))
-                col_left.mount(_card(UtilizationPanel(), flex=True))
+                col_left.mount(_card(self._make_util()))
             else:
-                # no util on left: stretch Home only when the columns need
-                # balancing (i.e. util is absent entirely).  When util is
-                # on the right, left is already the taller col — leave Home
-                # natural.
-                col_left.mount(_card(HomeStorage(), flex=(util_side is None)))
+                col_left.mount(_card(HomeStorage()))
 
             if util_side == "right":
                 col_right.mount(_card(CompactJobs()))
-                col_right.mount(_card(UtilizationPanel(), flex=True))
+                col_right.mount(_card(self._make_util()))
             else:
-                # right col has just jobs — stretch it so the columns match.
-                col_right.mount(_card(CompactJobs(), flex=True))
+                col_right.mount(_card(CompactJobs()))
 
         if show_ascii:
             ascii_row.remove_class("hidden")
             ascii_row.mount(self._make_decor(ascii_budget))
         else:
             ascii_row.add_class("hidden")
+
+    def _make_util(self) -> Widget:
+        """Build a UtilizationPanel and pin its height so it doesn't
+        demand `1fr` of its content-sized parent column."""
+        u = UtilizationPanel()
+        u.styles.height = self.UTIL_MIN_HEIGHT
+        return u
 
     def _make_decor(self, ascii_budget: int) -> Widget:
         """Pick the Overview decoration based on the user's config."""

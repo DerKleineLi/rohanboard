@@ -147,3 +147,61 @@ def test_lrz_layout_with_many_gpu_kinds_does_not_overflow():
         f"target {target} must accommodate dynamic totals "
         f"({p._totals_natural()}) + home ({p._HOME_NATURAL})"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Issue #2 — content-sized cols + 1fr ASCII spacer at multiple sizes
+# ──────────────────────────────────────────────────────────────────────
+#
+# These tests cover the 2026-05-05 layout fix: dropped `grid-rows: 1fr`
+# on #main and dropped the imperative `main.styles.height = target`. The
+# decision-tree assertions remain valid (mode + fit + util_side + target
+# + ascii_budget); the new property is that fit-mode never sets a
+# concrete height on #main, so the column with fewer GPU rows can't
+# leave dead space below it — the ASCII row at `1fr` absorbs the
+# slack regardless of which column is taller.
+
+
+def test_layout_at_narrow_width_100_x_30():
+    """Narrow window (100×30): forced single-column, mode='narrow'."""
+    layout = _decide_layout(w=100, h=30, job_count=8, gpu_rows=5)
+    mode, *_ = layout
+    assert mode == "narrow", f"100x30 → narrow, got {mode}"
+
+
+def test_layout_at_medium_width_140_x_40():
+    """Medium window (140×40, just past WIDE_MIN_WIDTH=130): wide+fit."""
+    layout = _decide_layout(w=140, h=40, job_count=8, gpu_rows=5)
+    mode, _, _, target, ascii_budget, fit = layout
+    assert mode == "wide" and fit is True
+    # target = max(left_nat, right_nat); should be > 0 and <= h.
+    assert 0 < target <= 40
+    # ASCII gets whatever remains of the window height after target.
+    assert ascii_budget == max(40 - target, 0)
+
+
+def test_layout_at_wide_width_180_x_50():
+    """Wide window (180×50): wide+fit, plenty of ASCII slack."""
+    layout = _decide_layout(w=180, h=50, job_count=8, gpu_rows=5)
+    mode, _, show_ascii, target, ascii_budget, fit = layout
+    assert mode == "wide" and fit is True
+    assert show_ascii is True, "180x50 has plenty of vertical room — ASCII should show"
+    assert ascii_budget >= 6, "ASCII needs at least its smallest art's footprint"
+
+
+def test_lrz_shape_no_hdd_at_three_sizes_target_grows_with_gpus():
+    """LRZ shape (no HDD, more GPU kinds) at three window sizes —
+    the target must scale with gpu_rows at every size and never
+    exceed window height."""
+    for (w, h) in [(140, 40), (160, 45), (180, 50)]:
+        rohan = _decide_layout(w=w, h=h, job_count=5, gpu_rows=5,
+                               has_ssd=True, has_hdd=True)
+        lrz = _decide_layout(w=w, h=h, job_count=5, gpu_rows=7,
+                             has_ssd=True, has_hdd=False)
+        _, _, _, rohan_t, _, _ = rohan
+        _, _, _, lrz_t, _, _ = lrz
+        # LRZ's totals card has +2 GPU rows but -1 HDD row → net taller.
+        assert lrz_t >= rohan_t, (
+            f"at {w}x{h}: LRZ target {lrz_t} should be >= rohan target "
+            f"{rohan_t} because LRZ has more GPU kinds"
+        )
