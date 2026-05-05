@@ -35,12 +35,42 @@ def _state_text(state: str) -> Text:
     return Text(state, style=_state_color(state))
 
 
-def _gpu_cell(node: Node) -> Text:
-    """Single GPU column — free/alloc/total triple, then label (kind+vram).
+# MIG-profile pattern: e.g. "3g.40gb", "2g.20gb", "1g.10gb". Lower-cased
+# by convention (matches the AvailableFeatures string slurm reports).
+_MIG_PROFILE_RE = re.compile(r"^\d+g\.\d+gb$", re.IGNORECASE)
 
-    CPU-only node → "—". Single GPU spec → "free / alloc / total  <kind> <vram>"
+
+def _norm_kind(kind: str, vram: str | None) -> str:
+    """Canonical GPU label across clusters: "<KIND> <VRAM>".
+
+    Non-MIG kinds get uppercased ("a100"→"A100", "rtx_3090"→"RTX_3090").
+    MIG profile kinds preserve their lowercase form ("3g.40gb"). VRAM is
+    appended unchanged when present (already a "NNGB" string from the
+    AvailableFeatures regex, e.g. "80GB"). When `vram` is None, only the
+    kind is returned. Empty `kind` and None `vram` return "" — caller
+    decides whether to render that as "—".
+    """
+    if not kind:
+        return vram or ""
+    is_mig = bool(_MIG_PROFILE_RE.match(kind))
+    canon = kind if is_mig else kind.upper()
+    if vram:
+        return f"{canon} {vram}"
+    return canon
+
+
+def _gpu_label(g) -> str:
+    """Canonical render-time label for a GpuSpec — wraps `_norm_kind`."""
+    label = _norm_kind(g.kind, g.vram)
+    return label if label else "—"
+
+
+def _gpu_cell(node: Node) -> Text:
+    """Single GPU column — free/alloc/total triple, then canonical label.
+
+    CPU-only node → "—". Single GPU spec → "free / alloc / total  <KIND> <VRAM>"
     (label collapses gracefully when kind or vram is missing — see
-    GpuSpec.display). Multiple GPU specs (MIG profiles) → distinct
+    `_norm_kind`). Multiple GPU specs (MIG profiles) → distinct
     "<triple> <label>" segments comma-joined.
 
     Order is intentional: the numbers are the load-bearing data the user
@@ -54,7 +84,7 @@ def _gpu_cell(node: Node) -> Text:
     for g in node.gpus:
         cell = Text()
         cell.append_text(fat(g.free, g.alloc, g.total))
-        label = g.display  # "H100 92GB", "rtx_a6000", or "—"
+        label = _gpu_label(g)  # "A100 80GB", "RTX_A6000", "3g.40gb 40GB", or "—"
         if label and label != "—":
             cell.append(f"  {label}")
         parts.append(cell)
@@ -589,13 +619,16 @@ def _cluster_totals(nodes: list[Node]) -> dict:
     cpu_total = sum(n.cpu_total for n in nodes)
     mem_alloc = sum(_mem_gib(n.mem_alloc_mb) for n in nodes)
     mem_total = sum(_mem_gib(n.mem_total_mb) for n in nodes)
-    # Aggregate by (kind, vram) so A100 80GB and A100 40GB are reported on
-    # separate rows on LRZ. On rohan, vram is None for everything so the
-    # rows are keyed by kind alone.
+    # Aggregate by canonical (KIND, vram) so A100 80GB and A100 40GB are
+    # reported on separate rows on LRZ. On rohan, vram is None for
+    # everything so rows are keyed by KIND alone. Using `_gpu_label`
+    # (instead of raw `g.display`) ensures the same physical GPU kind
+    # never splits into two rows just because its `kind` string was
+    # parsed in a different case across nodes.
     gpus: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     for n in nodes:
         for g in n.gpus:
-            label = g.display
+            label = _gpu_label(g)
             if label == "—":
                 continue
             gpus[label][0] += g.alloc

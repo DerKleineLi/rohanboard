@@ -377,10 +377,13 @@ class OverviewPanel(Widget):
         # row count varies per cluster (LRZ has H100 + A100-80 + A100-40 +
         # V100 + MIG profiles, rohan has fewer). Hardcoding 15 caused the
         # LRZ Home pane bottom to be painted over by the ASCII pane below.
+        # Match the canonical aggregation key in NodesSummary._cluster_totals
+        # so the row count we use for layout matches what gets rendered.
+        from .nodes_table import _gpu_label
         gpu_kinds: set[str] = set()
         for n in snap.nodes:
             for g in n.gpus:
-                lbl = g.display
+                lbl = _gpu_label(g)
                 if lbl != "—":
                     gpu_kinds.add(lbl)
         self._gpu_row_count = len(gpu_kinds)
