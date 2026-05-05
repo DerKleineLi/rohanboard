@@ -110,7 +110,7 @@ def _default_layout() -> LayoutConfig:
     return LayoutConfig(tabs=[
         TabConfig(id="overview", title="Overview", widgets=["overview_panel"]),
         TabConfig(id="jobs",     title="Jobs",     widgets=["jobs_table"]),
-        TabConfig(id="nodes",    title="Nodes",    widgets=["nodes_table"]),
+        TabConfig(id="nodes",    title="Nodes",    widgets=["nodes_summary", "nodes_table"]),
         TabConfig(id="storage",  title="Storage",  widgets=["storage_panel"]),
     ])
 

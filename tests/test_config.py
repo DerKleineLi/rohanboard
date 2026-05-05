@@ -122,3 +122,32 @@ def test_multi_cluster_duplicate_id_raises(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="duplicate cluster id"):
         load_config(cfg_path)
+
+
+def test_default_layout_includes_nodes_summary_in_both_overview_and_nodes():
+    """Cluster totals card must appear above the nodes table AND in overview.
+
+    Regression guard for issue #8: the default layout used to mount
+    `nodes_summary` only inside the Overview panel, leaving the Nodes tab
+    without the totals header. Both the Overview tab's `overview_panel`
+    (which embeds NodesSummary internally) and the Nodes tab must surface
+    the totals so users see the cluster-wide GPU pool when scanning nodes.
+    """
+    from rohanboard.config import _default_layout
+
+    layout = _default_layout()
+    tabs = {t.id: t for t in layout.tabs}
+    # Overview embeds NodesSummary inside the OverviewPanel widget — the
+    # tab itself just lists overview_panel. Nodes tab must list nodes_summary
+    # explicitly (mounted above nodes_table).
+    assert "overview" in tabs
+    assert "overview_panel" in tabs["overview"].widgets
+    assert "nodes" in tabs
+    assert "nodes_summary" in tabs["nodes"].widgets, (
+        "nodes_summary must be mounted in the Nodes tab default layout "
+        "so the cluster totals card sits above the per-node table"
+    )
+    assert "nodes_table" in tabs["nodes"].widgets
+    # Order: summary above table.
+    widgets = tabs["nodes"].widgets
+    assert widgets.index("nodes_summary") < widgets.index("nodes_table")
