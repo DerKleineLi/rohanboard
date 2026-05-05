@@ -456,36 +456,83 @@ def parse_dssusrinfo(text: str) -> DssInfo:
 async def discover_lrz_storage(executor: Executor) -> list[StorageEntry]:
     """Auto-discover LRZ storage: home + scratch + DSS containers.
 
-    Two SSH round-trips:
-      1. `bash -lc 'echo HOME=$HOME; echo MCML=$MCMLSCRATCH; echo --DSS--;
-                    dssusrinfo all'` — fetches env vars + dssusrinfo in one shot.
-      2. `df -B1 <home> <scratch> <containers...>` — sizes for a bar chart.
+    ONE SSH round-trip — coalesced from the previous two-call shape. The
+    sequence is:
+
+      1. (single ssh) emit env vars (HOME, MCMLSCRATCH) + dssusrinfo body
+         + (after parse on the wire) df -B1 of all known fixed paths in
+         the SAME shell command, separated by sentinels.
+
+    Per the saved memory `feedback_asyncio_subprocess_cancel_leaks.md`:
+    `Semaphore(1)` is correct for wedge protection but is PESSIMAL for
+    fan-out — coalesce at the COLLECTOR layer instead of widening the
+    cap. Two round-trips × Semaphore(1) is fully serial; one round-trip
+    halves the LRZ tick.
 
     Quotas (where reported by dssusrinfo) override the df-derived `total`
     so the bar reflects user-visible quota rather than physical disk.
 
     Returns an ordered list: home, scratch, then each container alphabetically.
-    Robust to dssusrinfo blocking — caller wraps timeout via per-`run` arg.
     """
-    # Wrapped under bash -lc so $MCMLSCRATCH (set by /etc/profile.d/...) and
-    # $HOME both resolve. SSHExecutor wraps argv in `bash -lc` by default, but
-    # LocalExecutor doesn't, so we pass the shell wrapper explicitly to make
-    # this work in both modes.
-    # Use a separator that's unique enough to split the prefix lines from the
-    # dssusrinfo body even if dssusrinfo's banners contain '---'.
-    sep = "---DSSUSRINFO_BEGIN---"
-    cmd = [
-        "bash", "-lc",
-        f"echo HOME=$HOME; echo MCML=$MCMLSCRATCH; echo {sep}; dssusrinfo all",
-    ]
+    # Two sentinels framing the dssusrinfo body and the df output so the
+    # client can split cleanly even if dssusrinfo's banners contain '---'.
+    SEP_DSS = "---DSSUSRINFO_BEGIN---"
+    SEP_DSS_END = "---DSSUSRINFO_END---"
+    SEP_DF = "---DFBLOCK_BEGIN---"
+
+    # The shell script runs everything in one ssh round-trip:
+    #   1. echo HOME + MCMLSCRATCH
+    #   2. dssusrinfo all
+    #   3. df -B1 $HOME $MCMLSCRATCH (always — known paths)
+    #
+    # DSS-container df has to wait until we KNOW their paths (parsed from
+    # dssusrinfo body). But — crucial trick — we do it in the SAME
+    # shell pipeline by parsing dssusrinfo with awk/sed inline. To keep
+    # the parser-on-the-wire simple, we capture dssusrinfo to a tmpfile,
+    # extract container paths via awk, and df them all in the same call.
+    # Net: one ssh round-trip, ~3 s warm tick (was 2 × 3 s = ~6 s).
+    script = f"""
+set -u
+echo HOME=$HOME
+echo MCML=${{MCMLSCRATCH-}}
+echo {SEP_DSS}
+TMPF=$(mktemp)
+trap 'rm -f "$TMPF"' EXIT
+dssusrinfo all > "$TMPF" 2>&1 || true
+cat "$TMPF"
+echo {SEP_DSS_END}
+echo {SEP_DF}
+# Build df argv: $HOME, $MCMLSCRATCH (if set), and any "at <path>" tokens
+# from the DSS containers section of dssusrinfo.
+PATHS=""
+[ -n "${{HOME:-}}" ] && PATHS="$PATHS $HOME"
+[ -n "${{MCMLSCRATCH:-}}" ] && PATHS="$PATHS $MCMLSCRATCH"
+# Container lines look like:  *  <name>  at  <path>  *
+CPATHS=$(awk '/^\\* +[^ ]+ +at +\\// {{ print $4 }}' "$TMPF")
+PATHS="$PATHS $CPATHS"
+if [ -n "$PATHS" ]; then
+  # df may emit warnings for missing paths; suppress to keep stdout clean.
+  df -B1 $PATHS 2>/dev/null || true
+fi
+"""
+    cmd = ["bash", "-lc", script]
     text = await executor.run(cmd, timeout=60.0)
+
+    # Parse: prefix env, dssusrinfo body, df body — sliced by sentinels.
     home_path: Path | None = None
     scratch_path: Path | None = None
     body = ""
-    if sep in text:
-        prefix, body = text.split(sep, 1)
+    df_text = ""
+
+    if SEP_DSS in text:
+        prefix, rest = text.split(SEP_DSS, 1)
     else:
-        prefix = text
+        prefix, rest = text, ""
+    if SEP_DSS_END in rest:
+        body, rest = rest.split(SEP_DSS_END, 1)
+    if SEP_DF in rest:
+        _, df_text = rest.split(SEP_DF, 1)
+
     for line in prefix.splitlines():
         if line.startswith("HOME="):
             v = line[len("HOME="):].strip()
@@ -503,7 +550,7 @@ async def discover_lrz_storage(executor: Executor) -> list[StorageEntry]:
     if info.home is not None:
         home_path = info.home
 
-    # Build the path list to df. Skip empty paths.
+    # Build the labelled-path list (df was already issued in the script).
     paths: list[tuple[str, Path]] = []
     if home_path is not None:
         paths.append(("home", home_path))
@@ -513,15 +560,27 @@ async def discover_lrz_storage(executor: Executor) -> list[StorageEntry]:
         if c.path and str(c.path):
             paths.append((c.name, c.path))
 
-    # Coalesce all paths into ONE `df -B1 path1 path2 ... pathN` call.
-    # One ssh round-trip vs N — critical for tick latency through
-    # Semaphore(1) (see fetch_df_multi for details).
+    # Demux the embedded df output. df_text already contains the multi-row
+    # df dump (with header on first line); reuse parse_df_multi to map
+    # mount-points back to requested paths.
     df_results: dict[str, StorageEntry | None] = {}
-    if paths:
-        labelled_paths = [(lbl, str(p)) for lbl, p in paths]
-        results = await fetch_df_multi(executor, labelled_paths)
-        for (lbl, _p), r in zip(paths, results):
-            df_results[lbl] = r
+    if paths and df_text.strip():
+        path_strs = [str(p) for _, p in paths]
+        by_path = parse_df_multi(df_text, path_strs)
+        for lbl, p in paths:
+            triple = by_path.get(str(p))
+            if triple is None:
+                df_results[lbl] = None
+            else:
+                total, used, avail = triple
+                df_results[lbl] = StorageEntry(
+                    label=lbl,
+                    used_bytes=used,
+                    total_bytes=total,
+                    avail_bytes=avail,
+                    source="df",
+                    path=str(p),
+                )
 
     out: list[StorageEntry] = []
 

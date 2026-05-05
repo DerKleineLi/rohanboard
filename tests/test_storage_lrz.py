@@ -4,10 +4,14 @@ Covers:
 - `parse_dssusrinfo` extracts home + at least one container with quota
   (also checked in test_storage.py; kept here for the file-as-spec view).
 - `discover_lrz_storage` end-to-end: stub the executor so it returns
-  (a) the env-var prefix + dssusrinfo body and (b) df -B1 output for
-  each path. Confirm the resulting StorageEntry list contains home,
-  scratch, and each container, with quota-overridden totals where
-  dssusrinfo reported one.
+  ONE coalesced shell-script response containing env vars + dssusrinfo
+  body + df output for each known + discovered path. Confirm the
+  resulting StorageEntry list contains home, scratch, and each
+  container, with quota-overridden totals where dssusrinfo reported one.
+
+  The 2026-05-05 single-RTT coalesce embeds the df output under a
+  `---DFBLOCK_BEGIN---` sentinel in the same shell script as
+  dssusrinfo. The FakeExecutor below builds that response shape.
 """
 from __future__ import annotations
 
@@ -20,6 +24,10 @@ from rohanboard.exec import Executor
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+SEP_DSS = "---DSSUSRINFO_BEGIN---"
+SEP_DSS_END = "---DSSUSRINFO_END---"
+SEP_DF = "---DFBLOCK_BEGIN---"
 
 
 def test_parse_dssusrinfo_home_and_container():
@@ -41,82 +49,69 @@ def test_parse_dssusrinfo_home_and_container():
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _build_bash_payload(
+    home: str | None,
+    mcml: str | None,
+    dssusrinfo_text: str,
+    df_paths: dict[str, tuple[int, int, int]],
+) -> str:
+    """Build the canned single-call response shape that the new coalesced
+    `discover_lrz_storage` expects: prefix (env) + DSS body + DF block.
+
+    `df_paths` maps {path → (total, used, avail)}. Paths missing from
+    that dict are absent from the df dump (simulates df failing on that
+    path or the path not existing).
+    """
+    lines: list[str] = []
+    lines.append(f"HOME={home or ''}")
+    lines.append(f"MCML={mcml or ''}")
+    lines.append(SEP_DSS)
+    lines.append(dssusrinfo_text)
+    lines.append(SEP_DSS_END)
+    lines.append(SEP_DF)
+    if df_paths:
+        lines.append("Filesystem     1B-blocks         Used   Available Use% Mounted on")
+        for path, (total, used, avail) in df_paths.items():
+            lines.append(f"fakefs {total} {used} {avail} 90% {path}")
+    return "\n".join(lines) + "\n"
+
+
 class FakeExecutor(Executor):
-    """Toy executor that hands back canned responses keyed by argv shape."""
-    def __init__(self, responses: dict[tuple, str]) -> None:
-        self.responses = responses
+    """Toy executor that hands back ONE canned response for the bash call."""
+    def __init__(self, bash_payload: str) -> None:
+        self.bash_payload = bash_payload
         self.calls: list[list[str]] = []
 
     async def run(self, argv: list[str], timeout: float = 30.0) -> str:  # noqa: ARG002
         self.calls.append(list(argv))
-        # Match by tuple-of-argv (or first/last token for a fuzzy fallback).
-        key = tuple(argv)
-        if key in self.responses:
-            return self.responses[key]
-        # Fallback: dispatch by argv[0] and the last positional arg.
-        if argv[0] == "df":
-            # df -B1 path1 path2 ... — concatenate per-path canned rows
-            # under a single header so parse_df_multi can split them.
-            paths = [a for a in argv[1:] if not a.startswith("-")]
-            if not paths:
-                return ""
-            rows: list[str] = []
-            header_used = False
-            for p in paths:
-                resp = self.responses.get(("df", p))
-                if resp is None:
-                    continue
-                # Each canned response has a header on the first non-empty
-                # line; emit it once, then strip it from subsequent rows.
-                lines = [ln for ln in resp.splitlines() if ln.strip()]
-                if not lines:
-                    continue
-                if not header_used:
-                    rows.append(lines[0])
-                    header_used = True
-                for ln in lines[1:]:
-                    rows.append(ln)
-            return "\n".join(rows) + ("\n" if rows else "")
-        if argv[0] == "bash":
-            return self.responses.get(("bash",), "")
+        if argv and argv[0] == "bash":
+            return self.bash_payload
         return ""
 
-
-def _df_response(path: str, total: int, used: int, avail: int) -> str:
-    """Mimic `df -B1 <path>` single-row output."""
-    return (
-        "Filesystem     1B-blocks         Used   Available Use% Mounted on\n"
-        f"fakefs {total} {used} {avail} 90% {path}\n"
-    )
+    async def whoami(self) -> str:
+        return "di35dob"
 
 
 @pytest.mark.asyncio
 async def test_discover_lrz_storage_assembles_home_scratch_containers():
-    """End-to-end: feed dssusrinfo + canned df responses, confirm we get
-    home + scratch + container entries with correct used / total."""
+    """End-to-end: feed dssusrinfo + canned df responses (all coalesced
+    into ONE bash call), confirm we get home + scratch + container
+    entries with correct used / total."""
     dssusrinfo_text = (FIXTURES / "dssusrinfo_all.txt").read_text()
-    sep = "---DSSUSRINFO_BEGIN---"
-    bash_payload = (
-        "HOME=/dss/dsshome1/03/di35dob\n"
-        "MCML=/dss/mcmlscratch/03/di35dob\n"
-        f"{sep}\n"
-        f"{dssusrinfo_text}"
+    bash_payload = _build_bash_payload(
+        home="/dss/dsshome1/03/di35dob",
+        mcml="/dss/mcmlscratch/03/di35dob",
+        dssusrinfo_text=dssusrinfo_text,
+        df_paths={
+            "/dss/dsshome1/03/di35dob":
+                (200_000_000_000, 85_000_000_000, 110_000_000_000),
+            "/dss/mcmlscratch/03/di35dob":
+                (50_000_000_000_000, 30_000_000_000_000, 20_000_000_000_000),
+            "/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000":
+                (10_000_000_000_000, 9_500_000_000_000, 500_000_000_000),
+        },
     )
-
-    responses = {
-        ("bash",): bash_payload,
-        # df returns are indexed by (cmd, path) — see FakeExecutor.run.
-        ("df", "/dss/dsshome1/03/di35dob"):
-            _df_response("/dss/dsshome1/03/di35dob",
-                         total=200_000_000_000, used=85_000_000_000, avail=110_000_000_000),
-        ("df", "/dss/mcmlscratch/03/di35dob"):
-            _df_response("/dss/mcmlscratch/03/di35dob",
-                         total=50_000_000_000_000, used=30_000_000_000_000, avail=20_000_000_000_000),
-        ("df", "/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000"):
-            _df_response("/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000",
-                         total=10_000_000_000_000, used=9_500_000_000_000, avail=500_000_000_000),
-    }
-    ex = FakeExecutor(responses)
+    ex = FakeExecutor(bash_payload)
 
     entries = await discover_lrz_storage(ex)
     by_label = {e.label: e for e in entries}
@@ -145,25 +140,55 @@ async def test_discover_lrz_storage_assembles_home_scratch_containers():
 
 
 @pytest.mark.asyncio
+async def test_discover_lrz_storage_issues_one_ssh_call_per_tick():
+    """The COALESCE FIX (issue #1+#3) — discover_lrz_storage MUST hit
+    the executor exactly once per call, not twice.
+
+    Was: bash (env+dssusrinfo) + df-multi = 2 round-trips × Semaphore(1)
+    fully serial, ~6 s LRZ tick. Now: 1 round-trip via embedded df.
+    Per saved memory feedback_asyncio_subprocess_cancel_leaks.md, the
+    coalesce is at the COLLECTOR layer; the Sem(1) cap is unchanged.
+    """
+    dssusrinfo_text = (FIXTURES / "dssusrinfo_all.txt").read_text()
+    bash_payload = _build_bash_payload(
+        home="/dss/dsshome1/03/di35dob",
+        mcml="/dss/mcmlscratch/03/di35dob",
+        dssusrinfo_text=dssusrinfo_text,
+        df_paths={
+            "/dss/dsshome1/03/di35dob":
+                (200_000_000_000, 85_000_000_000, 110_000_000_000),
+            "/dss/mcmlscratch/03/di35dob":
+                (50_000_000_000_000, 30_000_000_000_000, 20_000_000_000_000),
+            "/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000":
+                (10_000_000_000_000, 9_500_000_000_000, 500_000_000_000),
+        },
+    )
+    ex = FakeExecutor(bash_payload)
+    await discover_lrz_storage(ex)
+    assert len(ex.calls) == 1, (
+        f"discover_lrz_storage must issue exactly ONE ssh call; got "
+        f"{len(ex.calls)} ({[c[0] if c else None for c in ex.calls]})"
+    )
+    # And the one call is the bash script.
+    assert ex.calls[0][0] == "bash"
+
+
+@pytest.mark.asyncio
 async def test_discover_lrz_storage_handles_missing_dssusrinfo():
     """Defensive: when dssusrinfo body is empty (failed / no containers),
     the discoverer should still emit home + scratch from env vars + df."""
-    sep = "---DSSUSRINFO_BEGIN---"
-    bash_payload = (
-        "HOME=/dss/dsshome1/03/u123\n"
-        "MCML=/dss/mcmlscratch/03/u123\n"
-        f"{sep}\n"
+    bash_payload = _build_bash_payload(
+        home="/dss/dsshome1/03/u123",
+        mcml="/dss/mcmlscratch/03/u123",
+        dssusrinfo_text="",
+        df_paths={
+            "/dss/dsshome1/03/u123":
+                (200_000_000_000, 50_000_000_000, 150_000_000_000),
+            "/dss/mcmlscratch/03/u123":
+                (50_000_000_000_000, 10_000_000_000_000, 40_000_000_000_000),
+        },
     )
-    responses = {
-        ("bash",): bash_payload,
-        ("df", "/dss/dsshome1/03/u123"):
-            _df_response("/dss/dsshome1/03/u123",
-                         total=200_000_000_000, used=50_000_000_000, avail=150_000_000_000),
-        ("df", "/dss/mcmlscratch/03/u123"):
-            _df_response("/dss/mcmlscratch/03/u123",
-                         total=50_000_000_000_000, used=10_000_000_000_000, avail=40_000_000_000_000),
-    }
-    ex = FakeExecutor(responses)
+    ex = FakeExecutor(bash_payload)
 
     entries = await discover_lrz_storage(ex)
     labels = {e.label for e in entries}
@@ -183,33 +208,21 @@ async def test_discover_lrz_storage_caps_avail_at_quota_headroom():
     nonsense reading. After the cap, free_bytes ≤ total_bytes always.
     """
     dssusrinfo_text = (FIXTURES / "dssusrinfo_all.txt").read_text()
-    sep = "---DSSUSRINFO_BEGIN---"
-    bash_payload = (
-        "HOME=/dss/dsshome1/03/di35dob\n"
-        "MCML=/dss/mcmlscratch/03/di35dob\n"
-        f"{sep}\n"
-        f"{dssusrinfo_text}"
-    )
-    # df reports MASSIVE free for /dss/dsshome1 (hundreds of TiB); the
-    # user's quota is only 100 GB. The quota - used headroom = 100-89 = 11 GB.
     huge_df_avail = 317 * 1024**4  # 317 TiB
-    responses = {
-        ("bash",): bash_payload,
-        ("df", "/dss/dsshome1/03/di35dob"):
-            _df_response("/dss/dsshome1/03/di35dob",
-                         total=500_000_000_000_000, used=200_000_000_000_000,
-                         avail=huge_df_avail),
-        ("df", "/dss/mcmlscratch/03/di35dob"):
-            _df_response("/dss/mcmlscratch/03/di35dob",
-                         total=50_000_000_000_000, used=10_000_000_000_000,
-                         avail=40_000_000_000_000),
-        # Container with df overstating avail too.
-        ("df", "/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000"):
-            _df_response("/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000",
-                         total=100 * 1024**4, used=50 * 1024**4,
-                         avail=50 * 1024**4),
-    }
-    ex = FakeExecutor(responses)
+    bash_payload = _build_bash_payload(
+        home="/dss/dsshome1/03/di35dob",
+        mcml="/dss/mcmlscratch/03/di35dob",
+        dssusrinfo_text=dssusrinfo_text,
+        df_paths={
+            "/dss/dsshome1/03/di35dob":
+                (500_000_000_000_000, 200_000_000_000_000, huge_df_avail),
+            "/dss/mcmlscratch/03/di35dob":
+                (50_000_000_000_000, 10_000_000_000_000, 40_000_000_000_000),
+            "/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000":
+                (100 * 1024**4, 50 * 1024**4, 50 * 1024**4),
+        },
+    )
+    ex = FakeExecutor(bash_payload)
     entries = await discover_lrz_storage(ex)
     by_label = {e.label: e for e in entries}
 
@@ -233,16 +246,14 @@ async def test_discover_lrz_storage_uses_quota_headroom_when_df_missing():
     """When df doesn't return for a quota'd path, avail still gets the
     quota - used headroom (was None previously)."""
     dssusrinfo_text = (FIXTURES / "dssusrinfo_all.txt").read_text()
-    sep = "---DSSUSRINFO_BEGIN---"
-    bash_payload = (
-        "HOME=/dss/dsshome1/03/di35dob\n"
-        "MCML=/dss/mcmlscratch/03/di35dob\n"
-        f"{sep}\n"
-        f"{dssusrinfo_text}"
+    # df_paths empty — simulates df failing on every path.
+    bash_payload = _build_bash_payload(
+        home="/dss/dsshome1/03/di35dob",
+        mcml="/dss/mcmlscratch/03/di35dob",
+        dssusrinfo_text=dssusrinfo_text,
+        df_paths={},
     )
-    # No df response for home — simulates df failing on that path.
-    responses = {("bash",): bash_payload}
-    ex = FakeExecutor(responses)
+    ex = FakeExecutor(bash_payload)
     entries = await discover_lrz_storage(ex)
     by_label = {e.label: e for e in entries}
     home = by_label["home"]
