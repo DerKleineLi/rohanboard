@@ -150,3 +150,39 @@
 - `a5f2f26` nodes: GPU column triple-first ordering
 - `800459d` checkpoint: multi-cluster (steps 2/3/4) + LRZ storage WIP
 - (config-only, not in git) `/tmp/wsl_multi_config.toml` rohan exec → `ssh:rohan` (#7)
+
+## 4-issue fixes (since 2026-05-06)
+
+### whoami-based remote user detection (`#3`-related)
+- `SSHExecutor` now resolves the remote login via `whoami` on first probe rather than guessing from `~/.ssh/config`. Avoids the "Connection closed by user" path when local and remote usernames diverge (LRZ user `di35dob` ≠ local `hli`). Cached for the executor's lifetime.
+- See commit `7fda6a2` exec: detect remote user via whoami, suppress rc=255 on cancel.
+
+### `rc=255` on cancelled ssh children no longer surfaces as an error (`#3`)
+- `LocalExecutor.run` and `SSHExecutor.run` now treat `CancelledError`-induced 255 exits as silent (the asyncio cancel kills the ssh child with SIGTERM → 255, which is NOT a user-actionable error). Logged at debug, not propagated as `RuntimeError`.
+- See same commit `7fda6a2`.
+
+### LRZ storage discover coalesced into ONE ssh round-trip (`#1`)
+- `discover_lrz_storage(executor)` previously did 2 ssh calls (env+dssusrinfo, then `df -B1`). It now combines them into a single `bash -lc` command that prints env vars, dssusrinfo, then df. Roughly halves LRZ tick latency.
+- See commit `61f11cd` storage: coalesce LRZ discover into ONE ssh round-trip.
+
+### Overview wide-mode layout: content-sized columns + 1fr ASCII slack absorber (`#2`)
+- The OLD pattern was `grid-rows: 1fr` on `#main` plus an imperative `main.styles.height = max(left_nat, right_nat)`. Problem: `UtilizationPanel.DEFAULT_CSS` sets `height: 1fr`, so when the right column held a flex Util card, it pushed the SHARED grid row past the imperative target — the LEFT column ended up shorter than its allocation and a 1–3 row dead gap appeared below `HomeStorage`.
+- NEW pattern: drop `grid-rows: 1fr` and the imperative height; let each `.col` size to natural content (`height: auto`); ASCII pane below `#main` is `1fr` and absorbs whatever vertical slack remains. No card stretches inside `#main`. The `_make_util` helper imperatively pins Util to `UTIL_MIN_HEIGHT = 13` rows so it doesn't demand `1fr` of its content-sized parent column.
+- General Textual rule: when a 2-column grid is supposed to leave a flexible region BELOW it, prefer content-sized columns + a sibling `1fr` element below over `grid-rows: 1fr` + imperative height balancing. Imperative-height + child `1fr` cards is the trap.
+- Tests: `tests/test_overview_layout.py` — three new sizes (100×30 narrow, 140×40 wide+fit, 180×50 wide+fit) plus a multi-size LRZ-vs-rohan target check.
+- See commit `93ac41c` overview: content-sized columns + 1fr ASCII slack absorber.
+
+### Canonical GPU label across clusters: `<KIND uppercase> <VRAM>` (`#4`)
+- Render-time helper `_norm_kind(kind, vram)` in `widgets/nodes_table.py`:
+  - non-MIG kinds: uppercased (`a100` → `A100`, `rtx_3090` → `RTX_3090`, `rtx_a6000` → `RTX_A6000`)
+  - MIG profile kinds (regex `^\d+g\.\d+gb$`): preserved lowercase (`3g.40gb`)
+  - VRAM appended unchanged when present (`A100 80GB`); kind alone when None.
+- Applied at THREE render sites: `_gpu_cell` (per-node table), `_cluster_totals` (NodesSummary aggregation key), and `OverviewPanel.update_snapshot` (gpu_row_count for layout). The model-level `GpuSpec.display` is **unchanged** — canonicalization is render-layer only, per spec.
+- Tests: `tests/test_nodes_table.py` — `_norm_kind` lowercase→upper, idempotent upper, underscore preserved, MIG preserved lowercase, VRAM-None, empty kind cases. Existing `_gpu_cell` rohan-fixture test updated to assert `RTX_A6000` instead of `rtx_a6000`.
+- See commit `9f17161` nodes: canonical GPU kind format across clusters.
+
+### Recent change log (continued)
+- `7fda6a2` exec: detect remote user via whoami, suppress rc=255 on cancel
+- `61f11cd` storage: coalesce LRZ discover into ONE ssh round-trip
+- `93ac41c` overview: content-sized columns + 1fr ASCII slack absorber
+- `9f17161` nodes: canonical GPU kind format across clusters
