@@ -55,3 +55,46 @@ def test_parse_scontrol_handles_blank_separators():
     # No empty/null nodes should slip through.
     assert all(n.name and n.cpu_total > 0 for n in nodes)
     assert len(nodes) >= 5
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Issue #5 — MIG node aggregation at NODE level
+# ──────────────────────────────────────────────────────────────────
+
+
+def _one_node(fixture: str):
+    text = (FIXTURES / fixture).read_text()
+    nodes = parse_scontrol_show_node(text)
+    assert len(nodes) == 1, f"{fixture}: expected 1 node, got {len(nodes)}"
+    return nodes[0]
+
+
+def test_parse_node_lrz_mig_aggregates_at_node_level():
+    """MIG node with mixed profiles: AllocTRES gives ONE flat gres/gpu=N
+    for the whole node — slurm doesn't break out per profile. We must
+    emit ONE GpuSpec at node level, not one per profile.
+
+    Before the fix, the parser attributed all alloc to the FIRST profile,
+    producing fictitious -2 free per node and -6 free at cluster level
+    when 3 such nodes were summed.
+    """
+    n = _one_node("lrz_node_mig.txt")
+    assert n.name == "mcml-hgx-a100-019"
+    # Single synthetic GpuSpec covering all MIG slices on the node.
+    assert len(n.gpus) == 1, (
+        f"MIG node must produce exactly one GpuSpec at node level, "
+        f"got {len(n.gpus)}: {[g.kind for g in n.gpus]}"
+    )
+    g = n.gpus[0]
+    # Total = sum of profile counts: 4 (3g.40gb) + 4 (2g.20gb) + 8 (1g.10gb) = 16.
+    assert g.total == 16
+    # Alloc = AllocTRES gres/gpu=6 — the flat sum slurm reports.
+    assert g.alloc == 6
+    # Free is non-negative (the bug repro: -6 free at cluster level).
+    assert g.free == 10, f"free must equal total-alloc=10, got {g.free}"
+    # Kind label preserves which profiles were on the node so the user
+    # can see "MIG (3g.40gb+2g.20gb+1g.10gb)".
+    assert "3g.40gb" in g.kind
+    assert "2g.20gb" in g.kind
+    assert "1g.10gb" in g.kind
+    assert g.kind.startswith("MIG")
