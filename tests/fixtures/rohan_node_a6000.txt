@@ -1,0 +1,17 @@
+NodeName=angmar Arch=x86_64 CoresPerSocket=40 
+   CPUAlloc=62 CPUEfctv=80 CPUTot=80 CPULoad=14.55
+   AvailableFeatures=rtx_a6000
+   ActiveFeatures=rtx_a6000
+   Gres=gpu:rtx_a6000:8,mps:rtx_a6000:800
+   NodeAddr=131.159.98.107 NodeHostName=angmar Version=24.11.3
+   OS=Linux 5.15.0-134-generic #145~20.04.1-Ubuntu SMP Mon Feb 17 13:27:16 UTC 2025 
+   RealMemory=742683 AllocMem=520192 FreeMem=552115 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=rtx_a6000_submit,rtx_a6000_interactive 
+   BootTime=2026-03-23T16:19:00 SlurmdStartTime=2026-04-22T19:18:39
+   LastBusyTime=2026-04-22T11:22:12 ResumeAfterTime=None
+   CfgTRES=cpu=80,mem=742683M,billing=79,gres/gpu=8
+   AllocTRES=cpu=62,mem=508G,gres/gpu=8
+   CurrentWatts=0 AveWatts=0
+   
+

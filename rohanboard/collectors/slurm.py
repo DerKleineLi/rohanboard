@@ -5,11 +5,11 @@ through stable text formats: `squeue -h -o ...` and `scontrol show node --all`.
 """
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 from typing import Iterable
 
+from ..exec import Executor
 from .models import GpuSpec, Job, Node
 
 
@@ -36,8 +36,20 @@ SQUEUE_O_FIELDS = (
 # which covers every field we care about. The OS=... line has spaces and is
 # correctly skipped by this pattern.
 _KV_RE = re.compile(r"\b([A-Za-z_]+)=(\S+)")
-_GRES_GPU_RE = re.compile(r"gpu:([A-Za-z0-9_]+):(\d+)")
+# Gres takes two shapes in the wild:
+#   rohan classic:  `gpu:rtx_a6000:8`        → kind=rtx_a6000, count=8
+#   LRZ classic:    `gpu:8(S:0-1)`           → kind="",        count=8
+#   LRZ MIG:        `gpu:3g.20gb:16(S:0-1)`  → kind=3g.20gb,   count=16
+# The kind group is OPTIONAL (LRZ vanilla shape lacks it); the trailing
+# `(S:...)` socket-locality suffix is also optional. Allow `.` in kind so
+# MIG profiles like `3g.20gb` parse cleanly.
+_GRES_GPU_RE = re.compile(r"gpu:(?:([A-Za-z0-9_.]+):)?(\d+)(?:\(S:[^)]+\))?")
 _ALLOC_GPU_RE = re.compile(r"gres/gpu=(\d+)")
+# AvailableFeatures encodes <kind>-<vram> on LRZ for GPU nodes
+# (e.g. H100-92GB, A100-80GB, A100-40GB, V100-16GB, P100-16GB).
+# CPU nodes use CPU-350GB / CPU-AMD / CPU-1.7TB — these must NOT be
+# treated as GPU specs. Caller filters on the leading group != "CPU".
+_AVAIL_FEAT_GPU_RE = re.compile(r"^([A-Za-z0-9]+)-(\d+(?:\.\d+)?[A-Za-z]+)$")
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -137,31 +149,79 @@ def _parse_node_block(block: str) -> Node | None:
     if m:
         alloc_gpu_total = int(m.group(1))
 
+    partitions = [p for p in fields.get("Partitions", "").split(",") if p]
+    features = [f for f in fields.get("AvailableFeatures", "").split(",") if f and f != "(null)"]
+
+    # Resolve a single (kind, vram) pair from AvailableFeatures (LRZ shape).
+    # Used to fill in missing kind/vram for nodes whose Gres is only
+    # `gpu:N(S:...)`. Skipped for `CPU-*` features (cpu-only nodes).
+    feat_kind: str | None = None
+    feat_vram: str | None = None
+    for f in features:
+        m_feat = _AVAIL_FEAT_GPU_RE.match(f)
+        if m_feat and not f.startswith("CPU-"):
+            feat_kind = m_feat.group(1)
+            feat_vram = m_feat.group(2)
+            break
+
     gpus: list[GpuSpec] = []
     for kind, total in _GRES_GPU_RE.findall(gres_str):
         # All allocated GPUs on rohan nodes are of the node's single GPU kind,
         # so attribute the alloc count to the first (and only) entry.
         alloc = alloc_gpu_total if not gpus else 0
-        gpus.append(GpuSpec(kind=kind, total=int(total), alloc=alloc))
-
-    partitions = [p for p in fields.get("Partitions", "").split(",") if p]
-    features = [f for f in fields.get("AvailableFeatures", "").split(",") if f and f != "(null)"]
+        # Resolution order for kind/vram:
+        #  1. Gres `gpu:KIND:N` (rohan classic, MIG profiles): kind from Gres,
+        #     vram=None unless AvailableFeatures gives a sibling vram.
+        #  2. Gres `gpu:N(S:...)` (LRZ classic, no kind): kind+vram from
+        #     AvailableFeatures match.
+        if kind:
+            # Gres carried a kind; prefer it. If AvailableFeatures has a
+            # vram match for a *matching* kind (case-insensitive), keep
+            # vram too — otherwise leave vram=None to avoid mislabeling
+            # MIG profiles.
+            resolved_kind = kind
+            resolved_vram: str | None = None
+            if feat_kind and feat_kind.lower() == kind.lower() and feat_vram:
+                resolved_vram = feat_vram
+        else:
+            # Gres lacks kind — fall back to AvailableFeatures.
+            resolved_kind = feat_kind or ""
+            resolved_vram = feat_vram
+        gpus.append(GpuSpec(
+            kind=resolved_kind,
+            total=int(total),
+            alloc=alloc,
+            vram=resolved_vram,
+        ))
 
     try:
         cpu_load = float(fields["CPULoad"]) if fields.get("CPULoad", "N/A") != "N/A" else None
     except ValueError:
         cpu_load = None
 
+    # LRZ reports `FreeMem=N/A` on nodes that are slow to respond to slurmd
+    # health probes — and similar fields can be N/A on drained or just-booting
+    # nodes elsewhere. Treat any unparseable numeric field as 0 rather than
+    # crashing the whole parse.
+    def _int(name: str, default: int = 0) -> int:
+        v = fields.get(name)
+        if v is None:
+            return default
+        try:
+            return int(v)
+        except ValueError:
+            return default
+
     return Node(
         name=fields["NodeName"],
         partitions=partitions,
         state=fields.get("State", "UNKNOWN"),
-        cpu_total=int(fields.get("CPUTot", 0)),
-        cpu_alloc=int(fields.get("CPUAlloc", 0)),
+        cpu_total=_int("CPUTot"),
+        cpu_alloc=_int("CPUAlloc"),
         cpu_load=cpu_load,
-        mem_total_mb=int(fields.get("RealMemory", 0)),
-        mem_alloc_mb=int(fields.get("AllocMem", 0)),
-        mem_free_mb=int(fields.get("FreeMem", 0)),
+        mem_total_mb=_int("RealMemory"),
+        mem_alloc_mb=_int("AllocMem"),
+        mem_free_mb=_int("FreeMem"),
         gpus=gpus,
         features=features,
     )
@@ -177,26 +237,11 @@ def parse_scontrol_show_node(text: str) -> list[Node]:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# subprocess wrappers (async)
+# subprocess wrappers (async) — now delegated to an Executor.
 # ──────────────────────────────────────────────────────────────────────────
 
-async def _run(cmd: list[str], timeout: float = 15.0) -> str:
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise
-    if proc.returncode != 0:
-        raise RuntimeError(f"{cmd[0]} failed ({proc.returncode}): {stderr.decode().strip()}")
-    return stdout.decode()
 
-
-async def fetch_jobs(users: list[str] | None = None) -> list[Job]:
+async def fetch_jobs(executor: Executor, users: list[str] | None = None) -> list[Job]:
     """`users=['self']` → current user only; ['all'] or None → all users."""
     args = ["squeue", "-h", "-O", SQUEUE_O_FORMAT]
     if users and "all" not in users:
@@ -204,12 +249,12 @@ async def fetch_jobs(users: list[str] | None = None) -> list[Job]:
         resolved = [u for u in resolved if u]
         if resolved:
             args += ["-u", ",".join(resolved)]
-    text = await _run(args)
+    text = await executor.run(args)
     return parse_squeue(text)
 
 
-async def fetch_nodes() -> list[Node]:
-    text = await _run(["scontrol", "show", "node", "--all"])
+async def fetch_nodes(executor: Executor) -> list[Node]:
+    text = await executor.run(["scontrol", "show", "node", "--all"])
     return parse_scontrol_show_node(text)
 
 
@@ -295,7 +340,7 @@ def parse_sacct_row(text: str) -> dict[str, str]:
     }
 
 
-async def fetch_job_info(job_id: str) -> dict[str, str]:
+async def fetch_job_info(executor: Executor, job_id: str) -> dict[str, str]:
     """Job info dict.  Prefers `scontrol show job` (richest source) and falls
     back to `sacct` for completed jobs that slurmctld no longer holds in memory.
     Returns an empty dict if both sources fail (caller should handle that).
@@ -305,7 +350,7 @@ async def fetch_job_info(job_id: str) -> dict[str, str]:
     caller can show users where the data came from."""
     scontrol_cmd = ["scontrol", "show", "job", str(job_id)]
     try:
-        text = await _run(scontrol_cmd)
+        text = await executor.run(scontrol_cmd)
     except RuntimeError:
         # scontrol fails (typically: "Invalid job id specified") for jobs that
         # have left the controller's memory.  Fall back to the accounting db.
@@ -313,7 +358,7 @@ async def fetch_job_info(job_id: str) -> dict[str, str]:
             "sacct", "-j", str(job_id), "-X", "-P", "-n",
             "-o", ",".join(_SACCT_FALLBACK_FIELDS),
         ]
-        text = await _run(sacct_cmd)
+        text = await executor.run(sacct_cmd)
         d = parse_sacct_row(text)
         if d:
             d["_source"] = " ".join(sacct_cmd)
@@ -324,26 +369,27 @@ async def fetch_job_info(job_id: str) -> dict[str, str]:
     return d
 
 
-async def fetch_job_script(job_id: str) -> str:
+async def fetch_job_script(executor: Executor, job_id: str) -> str:
     """Original batch script body.  Live jobs: `scontrol write batch_script
     <id> -` (last arg `-` writes to stdout).  Completed jobs: falls back to
     `sacct -j <id> --batch-script` (Slurm 20.11+)."""
     try:
-        return await _run(["scontrol", "write", "batch_script", str(job_id), "-"])
+        return await executor.run(["scontrol", "write", "batch_script", str(job_id), "-"])
     except RuntimeError:
         # sacct emits the script straight to stdout (no pipe-format header).
-        return await _run(["sacct", "-j", str(job_id), "--batch-script"])
+        return await executor.run(["sacct", "-j", str(job_id), "--batch-script"])
 
 
-async def fetch_job_env(job_id: str) -> str:
+async def fetch_job_env(executor: Executor, job_id: str) -> str:
     """Environment variables snapshot at submission time.  Only available
     for jobs slurmctld still has in memory (live or very recently completed).
     Raises RuntimeError when Slurm doesn't have it — caller should treat that
     as 'unavailable' rather than an error."""
-    return await _run(["scontrol", "getenvironment", str(job_id)])
+    return await executor.run(["scontrol", "getenvironment", str(job_id)])
 
 
 async def fetch_recent_jobs(
+    executor: Executor,
     users: list[str] | None = None,
     starttime: str = "now-3days",
     limit: int = 50,
@@ -358,7 +404,7 @@ async def fetch_recent_jobs(
         # sacct defaults to the invoking user when no -u is given; -a /
         # --allusers is required to actually see everyone's history.
         args += ["-a"]
-    text = await _run(args, timeout=20.0)
+    text = await executor.run(args, timeout=20.0)
     jobs = parse_sacct(text)
     # Most-recent first; sacct returns ascending JobID, reverse.
     return list(reversed(jobs))[:limit]

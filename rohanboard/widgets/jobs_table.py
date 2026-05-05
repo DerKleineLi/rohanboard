@@ -156,10 +156,26 @@ _COLUMNS_ACTIVE = _size_cols(_ACTIVE_RAW)
 _COLUMNS_RECENT = _size_cols(_RECENT_RAW)
 
 
+def _job_id_int(job_id: str) -> int:
+    """Parse a slurm job-id (active or sacct) to a sortable int.
+
+    sacct emits array-task ids like ``12345_67`` and step ids like ``12345.batch``.
+    Both must collapse to the parent stem so they sort together with active jobs.
+    Returns ``-1`` if no leading integer is present (pure-text ids never appear
+    in practice but guard anyway). NEVER returns a string — keeps the sort
+    key monomorphic across active+recent panels.
+    """
+    head = str(job_id).split("_", 1)[0].split(".", 1)[0]
+    try:
+        return int(head)
+    except ValueError:
+        return -1
+
+
 def _sort_value(job: Job, col: str):
     try:
         if col == "job_id":
-            return int(job.job_id)
+            return _job_id_int(job.job_id)
         if col == "cpu":
             return job.num_cpus
         if col == "nodes":
@@ -187,7 +203,7 @@ def _sort_value(job: Job, col: str):
             return job.node_or_reason.lower()
     except Exception:
         pass
-    return job.job_id
+    return _job_id_int(job.job_id)
 
 
 class JobsTable(Widget):
@@ -498,12 +514,42 @@ class JobsTable(Widget):
         else:
             pill.remove_class("-active")
         # Mine-only is applied server-side via `-u $USER` — flip the App
-        # flag and kick a fresh fetch.  No client-side re-filtering.
+        # flag and kick a fresh fetch.  No client-side re-filtering.  In
+        # multi-cluster mode `App.mine_only` is a per-cluster dict; in
+        # single-cluster mode it's still the dict but with one entry, and
+        # we still find the right cluster via _owning_cluster_id.
         try:
-            self.app.mine_only = new                 # type: ignore[attr-defined]
+            cid = self._owning_cluster_id()
+            if cid is not None and isinstance(self.app.mine_only, dict):  # type: ignore[attr-defined]
+                self.app.mine_only[cid] = new                  # type: ignore[attr-defined]
+            else:
+                self.app.mine_only = new                       # type: ignore[attr-defined]
             self.run_worker(self.app._refresh_all(), exclusive=False)  # type: ignore[attr-defined]
         except Exception:
             pass
+
+    def _owning_cluster_id(self) -> str | None:
+        """Walk up the widget tree to find the cluster id of the outer
+        TabPane this JobsTable lives inside.  Returns None if we can't
+        figure it out (e.g. no outer cluster tabs in single-cluster mode,
+        but there's still one cluster — the caller falls back to the
+        first cluster's id).
+        """
+        # Avoid circular import.
+        from textual.widgets import TabPane as _TabPane
+        node = self.parent
+        while node is not None:
+            if isinstance(node, _TabPane) and (node.id or "").startswith("cluster_"):
+                return (node.id or "")[len("cluster_"):]
+            node = node.parent
+        # Single-cluster mode: only one cluster in the App.
+        try:
+            ids = list(self.app.snapshots.keys())  # type: ignore[attr-defined]
+            if len(ids) == 1:
+                return ids[0]
+        except Exception:
+            pass
+        return None
 
     # ── sort ────────────────────────────────────────────────
 

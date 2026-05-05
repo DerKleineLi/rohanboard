@@ -1,0 +1,18 @@
+NodeName=lrz-hgx-h100-001 Arch=x86_64 CoresPerSocket=24 
+   CPUAlloc=90 CPUEfctv=92 CPUTot=96 CPULoad=0.08
+   AvailableFeatures=H100-92GB
+   ActiveFeatures=H100-92GB
+   Gres=gpu:4(S:0-1)
+   NodeAddr=lrz-hgx-h100-001 NodeHostName=lrz-hgx-h100-001 Version=24.05.3
+   OS=Linux 5.15.0-173-generic #183-Ubuntu SMP Fri Mar 6 13:29:34 UTC 2026 
+   RealMemory=750000 AllocMem=383320 FreeMem=214748 Sockets=2 Boards=1
+   CoreSpecCount=2 CPUSpecList=46-47,94-95 
+   State=MIXED ThreadsPerCore=2 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=lrz-hgx-h100-94x4 
+   BootTime=2026-04-30T09:54:47 SlurmdStartTime=2026-04-30T09:57:33
+   LastBusyTime=2026-05-05T01:46:31 ResumeAfterTime=None
+   CfgTRES=cpu=92,mem=750000M,billing=1500264,gres/gpu=4
+   AllocTRES=cpu=90,mem=383320M,gres/gpu=4
+   CurrentWatts=0 AveWatts=0
+   
+

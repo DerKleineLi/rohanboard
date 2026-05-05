@@ -2,18 +2,38 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 
 @dataclass(frozen=True)
 class GpuSpec:
-    """A single GPU entry from a node's Gres list, e.g. rtx_a6000 x 8."""
-    kind: str       # e.g. "rtx_a6000", "a100", "gtx_1080"
+    """A single GPU entry from a node's Gres list, e.g. rtx_a6000 x 8.
+
+    `kind` may be empty when Gres reports only `gpu:N(S:...)` (LRZ shape).
+    `vram` is filled in when `AvailableFeatures` carries a `KIND-NNGB` shape
+    (LRZ); rohan's classic Gres has the kind but no VRAM, so `vram` is None
+    there. The combined display is "<kind> <vram>" with graceful "—"
+    fallback when both are missing.
+    """
+    kind: str       # e.g. "rtx_a6000", "a100", "H100", or "" for kind-less Gres
     total: int
     alloc: int = 0
+    vram: str | None = None    # e.g. "92GB", "80GB"; None when not parseable
 
     @property
     def free(self) -> int:
         return max(self.total - self.alloc, 0)
+
+    @property
+    def display(self) -> str:
+        """Human-readable label for the GPU column: '<kind> <vram>' or '—'."""
+        if self.kind and self.vram:
+            return f"{self.kind} {self.vram}"
+        if self.kind:
+            return self.kind
+        if self.vram:
+            return self.vram
+        return "—"
 
 
 @dataclass
@@ -87,6 +107,35 @@ class StorageEntry:
 
 
 @dataclass
+class DssContainer:
+    """One DSS container as reported by `dssusrinfo all`.
+
+    `path` is filesystem path; `used_gb`/`quota_gb`/`used_files`/`quota_files`
+    come from the "Container usage and limits" section. Files quotas and GB
+    quotas are both reported but kept independent.
+    """
+    name: str
+    path: Path
+    used_gb: float | None = None
+    quota_gb: float | None = None
+    used_files: int | None = None
+    quota_files: int | None = None
+
+
+@dataclass
+class DssInfo:
+    """Aggregated parse of `dssusrinfo all` output.
+
+    Defensive: missing sections leave fields as `None` / empty list rather
+    than raising — `dssusrinfo` is undocumented and may add/remove sections.
+    """
+    home: Path | None = None
+    home_used_gb: float | None = None
+    home_quota_gb: float | None = None
+    containers: list[DssContainer] = field(default_factory=list)
+
+
+@dataclass
 class UtilizationSample:
     """One historical sample of cluster utilization (fractions in [0, 1])."""
     cpu: float
@@ -97,8 +146,17 @@ class UtilizationSample:
 
 @dataclass
 class Snapshot:
-    """Whatever the collectors managed to fetch on the last refresh."""
-    jobs: list[Job] = field(default_factory=list)
+    """Whatever the collectors managed to fetch on the last refresh.
+
+    `jobs` is what the Jobs tab displays (honours the mine_only toggle).
+    `jobs_mine` is ALWAYS the current user's active jobs only — it powers
+    the Overview's "Active jobs" card, which must never show other users'
+    jobs even when the Jobs tab's mine_only toggle is off.  When
+    mine_only=True the two lists are aliases (one squeue call); when
+    mine_only=False the refresh tick does TWO squeue calls.
+    """
+    jobs: list[Job] = field(default_factory=list)          # for Jobs tab (all/mine per toggle)
+    jobs_mine: list[Job] = field(default_factory=list)     # for Overview (always self)
     recent_jobs: list[Job] = field(default_factory=list)   # from sacct
     nodes: list[Node] = field(default_factory=list)
     storage: list[StorageEntry] = field(default_factory=list)

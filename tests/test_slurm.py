@@ -55,3 +55,86 @@ def test_parse_scontrol_handles_blank_separators():
     # No empty/null nodes should slip through.
     assert all(n.name and n.cpu_total > 0 for n in nodes)
     assert len(nodes) >= 5
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Step 4 — LRZ + rohan node parsing fixtures (GPU column)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _one_node(fixture: str):
+    text = (FIXTURES / fixture).read_text()
+    nodes = parse_scontrol_show_node(text)
+    assert len(nodes) == 1, f"{fixture}: expected 1 node, got {len(nodes)}"
+    return nodes[0]
+
+
+def test_parse_node_lrz_h100():
+    n = _one_node("lrz_node_h100.txt")
+    assert n.name == "lrz-hgx-h100-001"
+    # LRZ Gres has no kind: `gpu:4(S:0-1)`. Kind+VRAM come from
+    # AvailableFeatures=H100-92GB.
+    assert len(n.gpus) == 1
+    g = n.gpus[0]
+    assert g.kind == "H100"
+    assert g.vram == "92GB"
+    assert g.total == 4
+    assert g.alloc == 4   # AllocTRES gres/gpu=4
+    assert g.display == "H100 92GB"
+
+
+def test_parse_node_lrz_a100_80():
+    n = _one_node("lrz_node_a100_80.txt")
+    g = n.gpus[0]
+    assert g.kind == "A100"
+    assert g.vram == "80GB"
+    assert g.total == 8
+    assert g.display == "A100 80GB"
+
+
+def test_parse_node_lrz_a100_40():
+    n = _one_node("lrz_node_a100_40.txt")
+    g = n.gpus[0]
+    assert g.kind == "A100"
+    assert g.vram == "40GB"
+    assert g.total == 8
+    # Same kind as 80GB but different vram — must distinguish.
+    assert g.display == "A100 40GB"
+
+
+def test_parse_node_lrz_v100():
+    n = _one_node("lrz_node_v100.txt")
+    g = n.gpus[0]
+    assert g.kind == "V100"
+    assert g.vram == "16GB"
+    assert g.total == 2
+
+
+def test_parse_node_lrz_cpu():
+    n = _one_node("lrz_node_cpu.txt")
+    # CPU node: Gres=(null), AvailableFeatures=CPU-350GB.
+    # No GpuSpec entries (CPU- features must NOT be treated as GPU).
+    assert n.gpus == []
+
+
+def test_parse_node_rohan_a100():
+    """Regression: rohan classic Gres carries kind, no vram."""
+    n = _one_node("rohan_node_a100.txt")
+    assert n.name == "andram"
+    g = n.gpus[0]
+    assert g.kind == "a100"
+    assert g.vram is None
+    assert g.total == 4
+    assert g.alloc == 4
+    assert g.display == "a100"
+
+
+def test_parse_node_rohan_a6000():
+    n = _one_node("rohan_node_a6000.txt")
+    assert n.name == "angmar"
+    g = n.gpus[0]
+    assert g.kind == "rtx_a6000"
+    assert g.vram is None
+    assert g.total == 8
+    assert g.alloc == 8
+    assert g.display == "rtx_a6000"

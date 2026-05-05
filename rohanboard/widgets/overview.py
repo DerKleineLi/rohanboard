@@ -94,7 +94,9 @@ class CompactJobs(Widget):
 
     def update_snapshot(self, snap: Snapshot) -> None:
         body = self.query_one("#body", Static)
-        jobs = snap.jobs
+        # Overview always shows the current user's jobs only — never other
+        # users', even when the Jobs tab's mine_only toggle is off.
+        jobs = snap.jobs_mine
         self.query_one("#title", Static).update(
             f"Active jobs  [dim]({len(jobs)})[/dim]"
         )
@@ -323,7 +325,9 @@ class OverviewPanel(Widget):
         self._relayout()
 
     def update_snapshot(self, snap: Snapshot) -> None:
-        self._job_count = len(snap.jobs)
+        # Overview's job pane shows mine-only — drive layout decisions off
+        # that count, not the (possibly all-users) Jobs-tab list.
+        self._job_count = len(snap.jobs_mine)
         # re-layout may be needed if util fit-check flipped
         self._relayout()
         self._push_snapshot()
@@ -351,18 +355,32 @@ class OverviewPanel(Widget):
             totals_h = 6 if w < 60 else self._TOTALS_NATURAL
             natural_need = totals_h + 1 + self._HOME_NATURAL + 1 + jobs_nat
             util_side = None
+            # Narrow mode flips to vertical scroll-the-page when the stack
+            # can't fit; the page-level ScrollableContainer wraps everything.
+            fit = natural_need <= h
         else:
             mode = "wide"
             left_nat = self._TOTALS_NATURAL + 1 + self._HOME_NATURAL
-            right_nat = jobs_nat
+            # Cap the right column's "natural" demand to the window height —
+            # CompactJobs has an internal VerticalScroll, so when it's given
+            # the right column at flex(1fr) its body just scrolls.  Without
+            # this cap, a 100+-job count would push natural_need beyond h,
+            # send us into scroll mode, and collapse the 2-col grid to a
+            # single column (because OverviewPanel.scroll #main forces
+            # layout: vertical).  Bounded right_nat → wide layout is always
+            # achievable; the CompactJobs card scrolls internally.
+            right_nat = min(jobs_nat, max(h, left_nat))
             natural_need = max(left_nat, right_nat)
             shorter_nat = min(left_nat, right_nat)
             gap = natural_need - shorter_nat
             util_side = None
             if natural_need <= h and gap >= self.UTIL_MIN_HEIGHT + 1:
                 util_side = "right" if right_nat <= left_nat else "left"
-        # Scroll mode when the minimum natural layout can't fit the window.
-        fit = natural_need <= h
+            # In wide mode we always fit — the right card uses internal
+            # scroll for any job-count overflow.  Only the left column's
+            # stack (Totals + Home, both with bounded height) needs to fit
+            # for the fit-mode CSS to give us a real two-column grid.
+            fit = left_nat <= h
         if fit:
             target = natural_need
             ascii_budget = max(h - target, 0)
@@ -453,7 +471,7 @@ class OverviewPanel(Widget):
         return AsciiArt(max_height=ascii_budget)
 
     def _push_snapshot(self) -> None:
-        snap = getattr(self.app, "snapshot", None)
+        snap = self._owning_snapshot()
         if snap is None:
             return
         for w in self.query("*"):
@@ -463,6 +481,28 @@ class OverviewPanel(Widget):
                     handler(snap)
                 except Exception:
                     pass
+
+    def _owning_snapshot(self) -> Snapshot | None:
+        """Find the Snapshot for the cluster this OverviewPanel lives in.
+
+        In multi-cluster mode each cluster has its own Snapshot in
+        `self.app.snapshots[<id>]`; we walk up to the outer TabPane to
+        figure out which cluster id we belong to.  Falls back to
+        `self.app.snapshot` (the active cluster's) when we can't tell —
+        which is the right answer in single-cluster mode.
+        """
+        # Avoid circular import.
+        from textual.widgets import TabPane as _TabPane
+        node = self.parent
+        while node is not None:
+            if isinstance(node, _TabPane) and (node.id or "").startswith("cluster_"):
+                cid = (node.id or "")[len("cluster_"):]
+                snaps = getattr(self.app, "snapshots", None)
+                if isinstance(snaps, dict) and cid in snaps:
+                    return snaps[cid]
+                break
+            node = node.parent
+        return getattr(self.app, "snapshot", None)
 
 
 def _card(widget: Widget, flex: bool = False) -> Widget:

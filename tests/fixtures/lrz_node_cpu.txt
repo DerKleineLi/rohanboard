@@ -1,0 +1,18 @@
+NodeName=cpu-001 Arch=x86_64 CoresPerSocket=20 
+   CPUAlloc=21 CPUEfctv=38 CPUTot=40 CPULoad=8.09
+   AvailableFeatures=CPU-350GB
+   ActiveFeatures=CPU-350GB
+   Gres=(null)
+   NodeAddr=cpu-001 NodeHostName=cpu-001 Version=24.05.3
+   OS=Linux 5.15.0-173-generic #183-Ubuntu SMP Fri Mar 6 13:29:34 UTC 2026 
+   RealMemory=335872 AllocMem=192512 FreeMem=301151 Sockets=2 Boards=1
+   CoreSpecCount=2 CPUSpecList=19,39 
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=lrz-cpu 
+   BootTime=2026-04-30T10:13:40 SlurmdStartTime=2026-04-30T10:19:17
+   LastBusyTime=2026-05-03T12:33:49 ResumeAfterTime=None
+   CfgTRES=cpu=38,mem=328G,billing=1679740
+   AllocTRES=cpu=21,mem=188G
+   CurrentWatts=0 AveWatts=0
+   
+

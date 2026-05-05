@@ -1,6 +1,7 @@
 """Per-node table + cluster totals card."""
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 
 from rich.text import Text
@@ -35,12 +36,22 @@ def _state_text(state: str) -> Text:
 
 
 def _gpu_cell(node: Node) -> Text:
+    """Single GPU column — label (kind+vram) then free/alloc/total triple.
+
+    CPU-only node → "—". Single GPU spec → "<kind> <vram>  free / alloc / total"
+    (label collapses gracefully when kind or vram is missing — see
+    GpuSpec.display). Multiple GPU specs (MIG profiles) → distinct
+    "<label> <triple>" segments comma-joined.
+    """
     if not node.gpus:
-        return Text("—")
+        return Text("—", style="dim")
     parts: list[Text] = []
     for g in node.gpus:
-        cell = fat(g.free, g.alloc, g.total)
-        cell.append(f" {g.kind}")
+        cell = Text()
+        label = g.display  # "H100 92GB", "rtx_a6000", or "—"
+        if label and label != "—":
+            cell.append(f"{label}  ")
+        cell.append_text(fat(g.free, g.alloc, g.total))
         parts.append(cell)
     out = Text()
     for i, p in enumerate(parts):
@@ -48,6 +59,38 @@ def _gpu_cell(node: Node) -> Text:
             out.append(", ")
         out.append_text(p)
     return out
+
+
+def _vram_sort_int(vram: str | None) -> int:
+    """Numeric VRAM (in GB-as-int) for sort tiebreaks; 0 when unparseable."""
+    if not vram:
+        return 0
+    m = re.match(r"^(\d+(?:\.\d+)?)", vram)
+    if m:
+        try:
+            return int(float(m.group(1)))
+        except ValueError:
+            return 0
+    return 0
+
+
+def _gpu_sort_key(node: Node, metric: str) -> tuple:
+    """Sort the GPU column by (kind, vram, then triple-metric).
+
+    `metric` ∈ {"free", "alloc", "total"} — picks which count to break ties on.
+    Nodes with no GPU sink to the end via empty kind + empty vram.
+    """
+    if not node.gpus:
+        return ("", 0, 0)
+    g = node.gpus[0]
+    kind = (g.kind or "").lower()
+    vram = _vram_sort_int(g.vram)
+    pool = {
+        "free":  sum(s.free for s in node.gpus),
+        "alloc": sum(s.alloc for s in node.gpus),
+        "total": sum(s.total for s in node.gpus),
+    }
+    return (kind, vram, pool.get(metric, pool["free"]))
 
 
 def _mem_gib(mb: int) -> float:
@@ -94,7 +137,8 @@ def _node_filter_record(n: Node, storage_map: dict[str, dict[str, StorageEntry]]
         "name":        n.name,
         "state":       n.state,
         "partitions":  ",".join(n.partitions),
-        "gpu_kind":    ",".join(g.kind for g in n.gpus),
+        "gpu_kind":    ",".join(g.kind for g in n.gpus if g.kind),
+        "gpu_vram":    ",".join(g.vram for g in n.gpus if g.vram),
         "cpu_free":    n.cpu_free,
         "cpu_alloc":   n.cpu_alloc,
         "cpu_total":   n.cpu_total,
@@ -148,11 +192,15 @@ Examples:
 
 # (col_key, base label, expected max data width, kind).
 # The effective column width is max(label_len + 2 for arrow, data_width + 1).
+# `gpu` is the SINGLE GPU column — renders "<kind> <vram>  free / alloc / total"
+# (LRZ: "H100 92GB  0 / 4 / 4"; rohan classic: "rtx_a6000  1 / 7 / 8";
+# CPU-only: "—"). Sort cycles free / alloc / total like other triples;
+# ties break on (kind, vram).
 _NODE_COLUMNS_RAW: tuple[tuple[str, str, int, str], ...] = (
     ("name",       "Node",                        9, "simple"),   # "daidalos" = 8
     ("state",      "State",                      13, "simple"),   # "MIXED+PLANNED" = 13
     ("cpu",        "CPU (free/alloc/total)",     17, "triple"),   # "1376 / 432 / 1808"
-    ("gpu",        "GPU (free/alloc/total)",     22, "triple"),   # "16 / 56 / 64 rtx_a6000"
+    ("gpu",        "GPU (free/alloc/total)",     26, "triple"),   # "A100 80GB  16 / 56 / 64"
     ("mem",        "Mem GiB (free/alloc/total)", 22, "triple"),   # "9593 / 6823 / 16415"
     ("ssd",        "SSD (free/alloc/total)",     32, "triple"),   # per-value units: "289 GiB / 39.3 TiB / 41.7 TiB"
     ("hdd",        "HDD (free/alloc/total)",     32, "triple"),
@@ -191,12 +239,8 @@ def _node_sort_key(
         value = {"free": node.cpu_free, "alloc": node.cpu_alloc, "total": node.cpu_total}[metric]
         return (value, name_lower)
     if col == "gpu":
-        pool = {
-            "free":  sum(g.free for g in node.gpus),
-            "alloc": sum(g.alloc for g in node.gpus),
-            "total": sum(g.total for g in node.gpus),
-        }
-        return (pool[metric], name_lower)
+        # (kind, vram-as-int, metric-count) so ties on count break on (kind, vram).
+        return _gpu_sort_key(node, metric) + (name_lower,)
     if col == "mem":
         alloc = node.mem_alloc_mb
         total = node.mem_total_mb
@@ -540,11 +584,17 @@ def _cluster_totals(nodes: list[Node]) -> dict:
     cpu_total = sum(n.cpu_total for n in nodes)
     mem_alloc = sum(_mem_gib(n.mem_alloc_mb) for n in nodes)
     mem_total = sum(_mem_gib(n.mem_total_mb) for n in nodes)
+    # Aggregate by (kind, vram) so A100 80GB and A100 40GB are reported on
+    # separate rows on LRZ. On rohan, vram is None for everything so the
+    # rows are keyed by kind alone.
     gpus: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     for n in nodes:
         for g in n.gpus:
-            gpus[g.kind][0] += g.alloc
-            gpus[g.kind][1] += g.total
+            label = g.display
+            if label == "—":
+                continue
+            gpus[label][0] += g.alloc
+            gpus[label][1] += g.total
     return {
         "cpu_alloc": cpu_alloc, "cpu_total": cpu_total,
         "mem_alloc": mem_alloc, "mem_total": mem_total,

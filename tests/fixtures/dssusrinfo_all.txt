@@ -1,0 +1,71 @@
+
+********************************************************************************
+*                                                                              *
+*                           LRZ DSS User Info Script                           *
+*                                                                              *
+*           ATTENTION: This script may block if node is not healthy.           *
+*                                                                              *
+********************************************************************************
+
+
+
+
+********************************************************************************
+*                                                                              *
+*           This node has access to the following DSS file systems:            *
+*                                                                              *
+* dssfs02              on /dss/dssfs02                                         *
+* dssfs03              on /dss/dssfs03                                         *
+* dssfs04              on /dss/dssfs04                                         *
+* dssfs05              on /dss/dssfs05                                         *
+* dsshome1             on /dss/dsshome1                                        *
+* dsslegfs01           on /dss/dsslegfs01                                      *
+* dsslegfs02           on /dss/dsslegfs02                                      *
+* dssmcmlfs01          on /dss/dssmcmlfs01                                     *
+* dsstbyfs01           on /dss/dsstbyfs01                                      *
+* dsstbyfs02           on /dss/dsstbyfs02                                      *
+* dsstbyfs03           on /dss/dsstbyfs03                                      *
+*                                                                              *
+********************************************************************************
+
+********************************************************************************
+*                                                                              *
+*               You have access to the following DSS Containers:               *
+*                                                                              *
+* pn25pi-dss-0000      at /dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000              *
+*                                                                              *
+********************************************************************************
+
+********************************************************************************
+*                                                                              *
+*                       DSS Container usage and limits:                        *
+*                                                                              *
+* pn25pi-dss-0000                  9733 of 10000            GB    used         *
+*                                                                              *
+* pn25pi-dss-0000              14838667 of 20000000         Files used         *
+*                                                                              *
+********************************************************************************
+
+********************************************************************************
+*                                                                              *
+*                      DSS usage and limits for di35dob:                       *
+*                                                                              *
+* pn25pi-dss-0000                   220 of Container MAX    GB    used         *
+*                                                                              *
+* pn25pi-dss-0000                110090 of Container MAX    Files used         *
+*                                                                              *
+********************************************************************************
+
+********************************************************************************
+*                                                                              *
+*                        DSS Homedir info for di35dob:                         *
+*                                                                              *
+* Your DSS based home directory is at /dss/dsshome1/03/di35dob                 *
+*                                                                              *
+* Quota and usage information of your DSS based home directory:                *
+*                                                                              *
+*               89 of 100              GB    used                              *
+*                                                                              *
+*           241541 of Unlimited        Files used                              *
+*                                                                              *
+********************************************************************************

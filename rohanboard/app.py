@@ -14,9 +14,11 @@ from textual.widgets import Footer, Header, Static, TabbedContent, TabPane
 
 from collections import deque
 
+from .cluster import Cluster
 from .collectors import slurm, storage
 from .collectors.models import Snapshot, StorageEntry, UtilizationSample
 from .config import Config, load as load_config
+from .exec import LocalExecutor
 from .perf import perf_block, perf_enabled, perf_log
 from .widgets.jobs_table import JobsTable
 from .widgets.nodes_table import NodesSummary, NodesTable
@@ -42,18 +44,43 @@ class RohanBoardApp(App):
         # `check_action` below.
         ("a", "jobs_toggle", "Active/Recent"),
         ("l", "jobs_tail_log", "Tail log"),
+        # Step-3 multi-cluster cycle.  No-ops in single-cluster mode (see
+        # check_action below — hidden when there's only one cluster).
+        ("c", "cycle_cluster", "Cycle cluster"),
     ]
 
+    # `snapshot` is the *active cluster's* snapshot.  Kept for back-compat
+    # with widgets that read `self.app.snapshot` directly (OverviewPanel).
+    # Per-cluster snapshots live on `self.snapshots[cluster_id]`.
     snapshot: reactive[Snapshot] = reactive(Snapshot, recompose=False, layout=False)
 
-    def __init__(self, config: Config | None = None) -> None:
+    def __init__(self, config: Config | None = None,
+                 cluster_id: str | None = None) -> None:
         super().__init__()
         self.cfg = config or load_config()
-        self._history: deque[UtilizationSample] = deque(maxlen=HISTORY_CAP)
+        if not self.cfg.clusters:
+            raise RuntimeError("config has no clusters; nothing to render")
+        # Step 3: pick the *initial* active cluster.  Multi-cluster TOML now
+        # renders as outer tabs; --cluster <id> just sets which tab is open
+        # at startup.  If unset, the first cluster wins.
+        if cluster_id is not None:
+            matches = [c for c in self.cfg.clusters if c.id == cluster_id]
+            if not matches:
+                ids = [c.id for c in self.cfg.clusters]
+                raise RuntimeError(f"no cluster with id={cluster_id!r}; available={ids}")
+            self.active_cluster_id: str = matches[0].id
+        else:
+            self.active_cluster_id = self.cfg.clusters[0].id
+        # Per-cluster snapshot + utilization history.
+        self.snapshots: dict[str, Snapshot] = {c.id: Snapshot() for c in self.cfg.clusters}
+        self._histories: dict[str, deque[UtilizationSample]] = {
+            c.id: deque(maxlen=HISTORY_CAP) for c in self.cfg.clusters
+        }
         # `mine_only` drives whether `-u $USER` is passed to squeue/sacct.
         # The "Mine only" pill in the Jobs tab flips this and triggers a
-        # fresh fetch — no need for client-side filtering.
-        self.mine_only: bool = True
+        # fresh fetch — no need for client-side filtering.  Per-cluster so
+        # that toggling on the rohan tab doesn't unexpectedly refetch LRZ.
+        self.mine_only: dict[str, bool] = {c.id: True for c in self.cfg.clusters}
         # Widget factories can reference per-widget config (e.g. filter presets).
         node_presets = self.cfg.presets.get("nodes", [])
         job_presets = self.cfg.presets.get("jobs", [])
@@ -68,7 +95,9 @@ class RohanBoardApp(App):
             "compact_jobs":      CompactJobs,
             "ascii_art":         AsciiArt,
         }
-        # Dynamic numbered bindings for the configured tabs (1..9).
+        # Dynamic numbered bindings for the configured tabs (1..9).  In
+        # multi-cluster mode the inner tabs of the *active* cluster are
+        # what these switch — see action_show_tab.
         for i, tab in enumerate(self.cfg.layout.tabs[:9], start=1):
             self.bind(str(i), f"show_tab('{tab.id}')", description=tab.title)
         # Resolve theme path: relative to package styles/ unless absolute.
@@ -78,8 +107,37 @@ class RohanBoardApp(App):
         self.CSS_PATH = theme_path  # type: ignore[assignment]
 
     # ────────────────────────────────────────────────────────────────────
+    # active cluster helpers
+    # ────────────────────────────────────────────────────────────────────
+
+    @property
+    def _cluster(self) -> Cluster:
+        """The currently-active cluster (drives `self.snapshot` + Jobs/Logs).
+
+        Kept as a property — single-cluster code that reads `self._cluster`
+        keeps working unchanged; multi-cluster code that needs to refresh a
+        non-active cluster reaches into `self.cfg.clusters` directly.
+        """
+        for c in self.cfg.clusters:
+            if c.id == self.active_cluster_id:
+                return c
+        # Fallback: should never happen unless active_cluster_id was nuked.
+        return self.cfg.clusters[0]
+
+    @property
+    def executor(self):
+        """Active cluster's executor.  Used by LogTailScreen."""
+        return self._cluster.executor
+
+    # ────────────────────────────────────────────────────────────────────
     # composition
     # ────────────────────────────────────────────────────────────────────
+
+    def _mk_widget(self, widget_id: str) -> Widget:
+        factory = self._widget_factories.get(widget_id)
+        if factory is None:
+            return Static(f"[red]Unknown widget: {widget_id}[/red]")
+        return factory()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -87,16 +145,41 @@ class RohanBoardApp(App):
             yield Static("No tabs configured.")
             yield Footer()
             return
-        with TabbedContent(initial=self.cfg.layout.tabs[0].id):
-            for tab in self.cfg.layout.tabs:
-                with TabPane(tab.title, id=tab.id):
-                    with ScrollableContainer(classes="tab-body"):
-                        for widget_id in tab.widgets:
-                            factory = self._widget_factories.get(widget_id)
-                            if factory is None:
-                                yield Static(f"[red]Unknown widget: {widget_id}[/red]")
-                            else:
-                                yield factory()
+        if not self.cfg.clusters:
+            yield Static("No clusters configured.")
+            yield Footer()
+            return
+
+        if len(self.cfg.clusters) == 1:
+            # Single-cluster: render directly (no outer cluster strip).
+            # Preserves the pre-step-3 single-cluster UX exactly.  Inner
+            # TabPane ids match the layout's tab.id verbatim — this is
+            # what existing tests + the action_show_tab path expect.
+            cluster = self.cfg.clusters[0]
+            with TabbedContent(initial=self.cfg.layout.tabs[0].id):
+                for tab in self.cfg.layout.tabs:
+                    with TabPane(tab.title, id=tab.id):
+                        with ScrollableContainer(classes="tab-body"):
+                            for widget_id in tab.widgets:
+                                yield self._mk_widget(widget_id)
+        else:
+            # Multi-cluster: outer cluster tabs wrap the inner Overview/
+            # Jobs/Nodes/Storage layout per cluster.  Each cluster gets its
+            # own widget instances so per-cluster state (filters, sort,
+            # cursor) is independent.
+            initial_outer = f"cluster_{self.active_cluster_id}"
+            with TabbedContent(initial=initial_outer, id="cluster_tabs"):
+                for cluster in self.cfg.clusters:
+                    with TabPane(cluster.title, id=f"cluster_{cluster.id}"):
+                        with TabbedContent(
+                            initial=f"{cluster.id}__{self.cfg.layout.tabs[0].id}",
+                            id=f"inner_tabs_{cluster.id}",
+                        ):
+                            for tab in self.cfg.layout.tabs:
+                                with TabPane(tab.title, id=f"{cluster.id}__{tab.id}"):
+                                    with ScrollableContainer(classes="tab-body"):
+                                        for widget_id in tab.widgets:
+                                            yield self._mk_widget(widget_id)
         yield Footer()
 
     # ────────────────────────────────────────────────────────────────────
@@ -106,11 +189,14 @@ class RohanBoardApp(App):
     async def on_mount(self) -> None:
         self._apply_size_class(self.size.width)
         await self._refresh_all()
-        # Use the slowest (storage) interval as the master tick; collectors
-        # below it skip work via their own elapsed-since-last logic in v1
-        # we just refresh everything on the shortest interval.
-        interval = max(min(self.cfg.refresh.slurm_jobs, self.cfg.refresh.slurm_nodes,
-                           self.cfg.refresh.storage), 1)
+        # Use the shortest configured interval across all clusters as the
+        # master tick.  All clusters refresh on each tick (parallel via
+        # asyncio.gather).
+        intervals: list[float] = []
+        for c in self.cfg.clusters:
+            intervals.extend([c.refresh.slurm_jobs, c.refresh.slurm_nodes,
+                              c.refresh.storage])
+        interval = max(min(intervals) if intervals else 5.0, 1)
         # run_worker(exclusive=True) — guards against overlapping ticks if a
         # previous refresh is still draining.
         self.set_interval(interval, self._refresh_all_bg)
@@ -127,7 +213,44 @@ class RohanBoardApp(App):
         await self._refresh_all()
 
     def action_show_tab(self, tab_id: str) -> None:
-        self.query_one(TabbedContent).active = tab_id
+        # Inner-tab switch for the *active* cluster.  Reach into the inner
+        # TabbedContent if it exists (multi-cluster mode); else flat mode.
+        if len(self.cfg.clusters) > 1:
+            try:
+                inner = self.query_one(
+                    f"#inner_tabs_{self.active_cluster_id}", TabbedContent
+                )
+                inner.active = f"{self.active_cluster_id}__{tab_id}"
+                return
+            except Exception:
+                pass
+        # Single-cluster: TabPane ids are the bare tab.id.
+        try:
+            self.query_one(TabbedContent).active = tab_id
+        except Exception:
+            pass
+
+    def action_cycle_cluster(self) -> None:
+        if len(self.cfg.clusters) <= 1:
+            return
+        ids = [c.id for c in self.cfg.clusters]
+        try:
+            cur = ids.index(self.active_cluster_id)
+        except ValueError:
+            cur = 0
+        new_id = ids[(cur + 1) % len(ids)]
+        self.active_cluster_id = new_id
+        try:
+            tabs = self.query_one("#cluster_tabs", TabbedContent)
+            tabs.active = f"cluster_{new_id}"
+        except Exception:
+            pass
+        # Refresh-bindings so the footer reflects the active cluster's
+        # tab-scoped shortcuts (e.g. `a`/`l` only on Jobs).
+        self.refresh_bindings()
+        # Update the snapshot reactive so OverviewPanel etc. that read
+        # `self.app.snapshot` see the new active cluster's data.
+        self.snapshot = self.snapshots[new_id]
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Scope tab-specific actions to their tab.
@@ -137,35 +260,73 @@ class RohanBoardApp(App):
           * None  → shown but disabled (greyed)
           * False → hidden entirely
         We want Jobs-only shortcuts to *disappear* on other tabs, not grey
-        out, so we return False off-tab.
+        out, so we return False off-tab.  The cluster-cycle shortcut is
+        hidden when there's only one cluster.
         """
+        if action == "cycle_cluster" and len(self.cfg.clusters) <= 1:
+            return False
         if action in ("jobs_toggle", "jobs_tail_log"):
-            try:
-                active = self.query_one(TabbedContent).active
-            except Exception:
-                active = None
-            if active != "jobs":
+            inner = self._active_inner_tab()
+            if inner != "jobs":
                 return False
         return True
 
-    def on_tabbed_content_tab_activated(self, event) -> None:  # type: ignore[no-untyped-def]
-        # Refresh footer / key dispatcher when user switches tabs so the
-        # hidden shortcuts appear/disappear.
-        self.refresh_bindings()
+    def _active_inner_tab(self) -> str | None:
+        """Return the active inner-tab name (e.g. "jobs") for the active
+        cluster.  Works in both single and multi-cluster mode.
 
-    def _visible_jobs_table(self) -> JobsTable | None:
-        """Return the JobsTable on the *currently active* tab, or None if
-        the Jobs tab isn't active.  No fallback — we don't want `a`/`l`
-        to reach into a Jobs table from another tab's context."""
+        In multi-cluster mode the inner pane ids are "<cluster>__<tab>",
+        so we strip the prefix.  In single-cluster mode the ids are the
+        bare tab.id.
+        """
+        if len(self.cfg.clusters) > 1:
+            try:
+                inner = self.query_one(
+                    f"#inner_tabs_{self.active_cluster_id}", TabbedContent
+                )
+                active = inner.active
+            except Exception:
+                return None
+            if not active:
+                return None
+            return active.split("__", 1)[1] if "__" in active else active
         try:
             active = self.query_one(TabbedContent).active
         except Exception:
             return None
+        return active or None
+
+    def on_tabbed_content_tab_activated(self, event) -> None:  # type: ignore[no-untyped-def]
+        # Refresh footer / key dispatcher when user switches tabs so the
+        # hidden shortcuts appear/disappear.  Also catch outer-tab clicks
+        # to update active_cluster_id.
+        try:
+            tab_id = getattr(getattr(event, "pane", None), "id", None) or ""
+        except Exception:
+            tab_id = ""
+        if tab_id.startswith("cluster_"):
+            new_id = tab_id[len("cluster_"):]
+            if new_id in self.snapshots and new_id != self.active_cluster_id:
+                self.active_cluster_id = new_id
+                self.snapshot = self.snapshots[new_id]
+        self.refresh_bindings()
+
+    def _visible_jobs_table(self) -> JobsTable | None:
+        """Return the JobsTable on the *currently active* tab of the
+        *currently active cluster*, or None if the Jobs tab isn't active.
+        """
+        if self._active_inner_tab() != "jobs":
+            return None
+        # Pane id is bare tab.id in single-cluster mode, prefixed in multi.
+        target_pane_id = (
+            f"{self.active_cluster_id}__jobs"
+            if len(self.cfg.clusters) > 1 else "jobs"
+        )
         for w in self.query(JobsTable):
             pane = w.parent
             while pane is not None and not isinstance(pane, TabPane):
                 pane = pane.parent
-            if isinstance(pane, TabPane) and pane.id == active:
+            if isinstance(pane, TabPane) and pane.id == target_pane_id:
                 return w
         return None
 
@@ -185,76 +346,110 @@ class RohanBoardApp(App):
         self.run_worker(self._refresh_all(), exclusive=True, name="refresh_all")
 
     async def _refresh_all(self) -> None:
-        snap = Snapshot()
+        """Refresh every cluster's snapshot in parallel.
 
-        users_for_fetch = ["self"] if self.mine_only else ["all"]
+        Each cluster gets an independent Snapshot built from its own
+        executor + filters; per-cluster errors are isolated (a broken LRZ
+        SSH master never blanks the rohan tab).
+        """
+        with perf_block("refresh", "all_clusters"):
+            await asyncio.gather(
+                *[self._refresh_cluster(c) for c in self.cfg.clusters],
+                return_exceptions=True,
+            )
+        # After all clusters refresh, push the active cluster's snapshot
+        # through the reactive so the global broadcast triggers.
+        active_snap = self.snapshots.get(self.active_cluster_id)
+        if active_snap is not None:
+            with perf_block("refresh", "reactive_set"):
+                self.snapshot = active_snap
+
+    async def _refresh_cluster(self, cluster: Cluster) -> None:
+        snap = Snapshot()
+        mine_only = self.mine_only.get(cluster.id, True)
+        users_for_fetch = ["self"] if mine_only else ["all"]
+        executor = cluster.executor
 
         async def grab_jobs():
             try:
-                with perf_block("collect", "jobs"):
-                    snap.jobs = await slurm.fetch_jobs(users_for_fetch)
+                with perf_block("collect", f"{cluster.id}.jobs"):
+                    snap.jobs = await slurm.fetch_jobs(executor, users_for_fetch)
             except Exception as e:
                 snap.errors["jobs"] = str(e)
+            if mine_only:
+                snap.jobs_mine = snap.jobs
+                return
+            try:
+                with perf_block("collect", f"{cluster.id}.jobs_mine"):
+                    snap.jobs_mine = await slurm.fetch_jobs(executor, ["self"])
+            except Exception as e:
+                snap.errors["jobs_mine"] = str(e)
 
         async def grab_recent():
             try:
-                with perf_block("collect", "recent"):
-                    snap.recent_jobs = await slurm.fetch_recent_jobs(users_for_fetch)
+                with perf_block("collect", f"{cluster.id}.recent"):
+                    snap.recent_jobs = await slurm.fetch_recent_jobs(executor, users_for_fetch)
             except Exception as e:
                 snap.errors["recent_jobs"] = str(e)
 
         async def grab_nodes():
             try:
-                with perf_block("collect", "nodes"):
-                    nodes = await slurm.fetch_nodes()
-                if self.cfg.slurm.include_partitions:
-                    inc = set(self.cfg.slurm.include_partitions)
+                with perf_block("collect", f"{cluster.id}.nodes"):
+                    nodes = await slurm.fetch_nodes(executor)
+                if cluster.slurm.include_partitions:
+                    inc = set(cluster.slurm.include_partitions)
                     nodes = [n for n in nodes if any(p in inc for p in n.partitions)]
-                if self.cfg.slurm.exclude_partitions:
-                    exc = set(self.cfg.slurm.exclude_partitions)
+                if cluster.slurm.exclude_partitions:
+                    exc = set(cluster.slurm.exclude_partitions)
                     nodes = [n for n in nodes if not any(p in exc for p in n.partitions)]
                 snap.nodes = nodes
             except Exception as e:
                 snap.errors["nodes"] = str(e)
 
         async def grab_storage():
-            with perf_block("collect", "storage"):
+            with perf_block("collect", f"{cluster.id}.storage"):
                 await _grab_storage_impl()
 
         async def _grab_storage_impl():
             entries: list[StorageEntry] = []
-            for entry_cfg in self.cfg.storage_entries:
+            for entry_cfg in cluster.storage_entries:
                 try:
                     if entry_cfg.kind == "quota":
-                        e = await storage.fetch_quota(entry_cfg.label, entry_cfg.filesystem)
+                        e = await storage.fetch_quota(executor, entry_cfg.label, entry_cfg.filesystem)
                         if e is not None:
                             entries.append(e)
                     elif entry_cfg.kind == "df":
                         if not entry_cfg.path:
                             continue
-                        e = await storage.fetch_df(entry_cfg.label, entry_cfg.path)
+                        e = await storage.fetch_df(executor, entry_cfg.label, entry_cfg.path)
                         if e is not None:
                             entries.append(e)
                     elif entry_cfg.kind == "auto":
                         prefixes = entry_cfg.prefixes or ["/cluster", "/cluster_HDD"]
-                        discovered = storage.discover_mounts(prefixes)
+                        discovered = await storage.discover_mounts(executor, prefixes)
                         # df all of them in parallel
                         results = await asyncio.gather(
-                            *[storage.fetch_df(label, path) for label, path in discovered],
+                            *[storage.fetch_df(executor, label, path) for label, path in discovered],
                             return_exceptions=True,
                         )
                         for r in results:
                             if isinstance(r, StorageEntry):
                                 entries.append(r)
+                    elif entry_cfg.kind == "auto_lrz":
+                        # LRZ: home + scratch + DSS containers via dssusrinfo.
+                        # Single round-trip for env+dssusrinfo, then df in
+                        # parallel for sizes — see collectors/storage.py.
+                        lrz_entries = await storage.discover_lrz_storage(executor)
+                        entries.extend(lrz_entries)
                 except Exception as e:
                     snap.errors[f"storage:{entry_cfg.label}"] = str(e)
             snap.storage = entries
 
-        with perf_block("refresh", "gather",
-                         extra=f"jobs={len(snap.jobs)}"):
+        with perf_block("refresh", f"{cluster.id}.gather"):
             await asyncio.gather(grab_jobs(), grab_recent(), grab_nodes(), grab_storage())
 
-        # Append to rolling history (only if we got node data).
+        # Append to per-cluster rolling history (only if we got node data).
+        history = self._histories[cluster.id]
         if snap.nodes:
             cpu_total = sum(n.cpu_total for n in snap.nodes) or 1
             cpu_alloc = sum(n.cpu_alloc for n in snap.nodes)
@@ -262,15 +457,16 @@ class RohanBoardApp(App):
             mem_alloc = sum(n.mem_alloc_mb for n in snap.nodes)
             gpu_total = sum(g.total for n in snap.nodes for g in n.gpus) or 1
             gpu_alloc = sum(g.alloc for n in snap.nodes for g in n.gpus)
-            self._history.append(UtilizationSample(
+            history.append(UtilizationSample(
                 cpu=cpu_alloc / cpu_total,
                 gpu=gpu_alloc / gpu_total,
                 mem=mem_alloc / mem_total,
             ))
-        snap.history = list(self._history)
-        # Reactive write — synchronously triggers watch_snapshot fan-out.
-        with perf_block("refresh", "reactive_set"):
-            self.snapshot = snap
+        snap.history = list(history)
+        # Stash on the per-cluster dict; broadcast to widgets in this
+        # cluster's pane.
+        self.snapshots[cluster.id] = snap
+        await self._broadcast_to_cluster(cluster.id, snap)
 
     # ────────────────────────────────────────────────────────────────────
     # responsive
@@ -291,30 +487,39 @@ class RohanBoardApp(App):
             screen.add_class("medium")
 
     def watch_snapshot(self, _old: Snapshot, new: Snapshot) -> None:
-        # Defer the actual fan-out to an async broadcast so we can yield
-        # to the event loop between each widget — letting animation
-        # frames interleave with the refresh instead of starving them.
-        self.run_worker(self._broadcast_snapshot(new),
-                        exclusive=True, name="broadcast_snapshot")
+        # The reactive is fired by `_refresh_all` (post-fan-out) and by
+        # `action_cycle_cluster` (when switching active tab).  Cycling
+        # alone shouldn't re-broadcast every cluster — _broadcast_to_cluster
+        # is what handles each cluster's pane during refresh.  But we DO
+        # need this here for OverviewPanel, which queries `self.app.snapshot`
+        # directly during compose / on_mount; setting the reactive triggers
+        # its watchers normally.  No-op here: the per-cluster broadcast
+        # already happened in _refresh_cluster.
+        return
 
-    async def _broadcast_snapshot(self, new: Snapshot) -> None:
-        """Push `new` into every widget that implements update_snapshot,
-        yielding to the loop between each so the 20 FPS animation timer
-        can fire in between.
+    async def _broadcast_to_cluster(self, cluster_id: str, snap: Snapshot) -> None:
+        """Push `snap` into every widget that lives inside the outer
+        TabPane for `cluster_id` (multi-cluster mode) or every widget
+        in the tree (single-cluster mode).
 
-        `batch_update()` coalesces the resulting screen refreshes into a
-        single paint once the fan-out completes.
+        Yields to the loop between widgets so animation timers can fire
+        between fan-out steps.
         """
         import time as _t
-        with perf_block("fanout", "all"), self.batch_update():
+        multi = len(self.cfg.clusters) > 1
+        target_pane_id = f"cluster_{cluster_id}"
+
+        with perf_block("fanout", cluster_id), self.batch_update():
             for widget in list(self.query("*")):
                 handler = getattr(widget, "update_snapshot", None)
                 if not callable(handler):
                     continue
+                if multi and not _is_under_pane(widget, target_pane_id):
+                    continue
                 if perf_enabled():
                     t0 = _t.perf_counter()
                     try:
-                        handler(new)
+                        handler(snap)
                     except Exception:
                         perf_log("widget", type(widget).__name__,
                                  (_t.perf_counter() - t0) * 1000, extra="error")
@@ -323,7 +528,7 @@ class RohanBoardApp(App):
                              (_t.perf_counter() - t0) * 1000)
                 else:
                     try:
-                        handler(new)
+                        handler(snap)
                     except Exception:
                         import traceback
                         self.log(f"update_snapshot failed for {widget!r}\n{traceback.format_exc()}")
@@ -332,3 +537,17 @@ class RohanBoardApp(App):
                 # widget updates rather than getting starved by a tight
                 # `sleep(0)` loop.
                 await asyncio.sleep(0.001)
+
+
+def _is_under_pane(widget: Widget, target_pane_id: str) -> bool:
+    """True iff `widget` is a descendant of a TabPane with id=target_pane_id.
+
+    Walks up the parent chain.  Used by `_broadcast_to_cluster` to keep
+    each cluster's snapshot from leaking into the wrong cluster's tab.
+    """
+    node = widget.parent
+    while node is not None:
+        if isinstance(node, TabPane) and node.id == target_pane_id:
+            return True
+        node = node.parent
+    return False

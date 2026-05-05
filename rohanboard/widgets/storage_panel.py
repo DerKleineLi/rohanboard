@@ -12,13 +12,24 @@ from .format import fat_bytes
 
 
 def _classify(entry: StorageEntry) -> str:
-    if entry.source == "quota":
-        return "home"
     p = entry.path or ""
+    label = entry.label.lower()
+    # Home: rohan's quota-based home, LRZ's dssusrinfo-derived home (also
+    # source="quota" with label="home"), and any /dss/dsshome1/... path.
+    if label == "home" or p.startswith("/dss/dsshome1/"):
+        return "home"
+    if entry.source == "quota":
+        # rohan quota fallback (label may differ)
+        if "/cluster" not in p:
+            return "home"
     if p.startswith("/cluster_HDD/"):
         return "hdd"
     if p.startswith("/cluster/"):
         return "ssd"
+    # LRZ scratch + DSS containers — group together under "DSS" (we re-use
+    # the "other" slot, retitled for LRZ).
+    if p.startswith("/dss/"):
+        return "dss"
     return "other"
 
 
@@ -131,6 +142,7 @@ _GROUP_TITLES = {
     "home": "Home",
     "ssd":  "SSD  /cluster",
     "hdd":  "HDD  /cluster_HDD",
+    "dss":  "DSS  /dss (LRZ)",
     "other": "Other",
 }
 
@@ -229,7 +241,7 @@ class StoragePanel(Widget):
     }
     """
 
-    GROUP_ORDER = ("home", "ssd", "hdd", "other")
+    GROUP_ORDER = ("home", "ssd", "hdd", "dss", "other")
 
     def compose(self) -> ComposeResult:
         yield Static("Storage  [dim](green = free)[/dim]", classes="panel_title")

@@ -130,7 +130,7 @@ class LogTailScreen(ModalScreen):
 
     async def on_mount(self) -> None:
         try:
-            self._info = await slurm.fetch_job_info(self.job_id)
+            self._info = await slurm.fetch_job_info(self.app.executor, self.job_id)
         except Exception as e:
             self._write("stdout", f"[error] could not fetch job info "
                                   f"(scontrol + sacct both failed): {e}")
@@ -230,7 +230,7 @@ class LogTailScreen(ModalScreen):
         log = self.query_one("#log_script", RichLog)
         log.write("[fetching batch script…]")
         try:
-            text = await slurm.fetch_job_script(self.job_id)
+            text = await slurm.fetch_job_script(self.app.executor, self.job_id)
         except Exception as e:
             text = f"[batch script unavailable: {e}]"
         self._script_done = True

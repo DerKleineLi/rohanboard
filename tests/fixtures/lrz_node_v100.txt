@@ -1,0 +1,18 @@
+NodeName=gpu-001 Arch=x86_64 CoresPerSocket=10 
+   CPUAlloc=16 CPUEfctv=18 CPUTot=20 CPULoad=58.25
+   AvailableFeatures=V100-16GB
+   ActiveFeatures=V100-16GB
+   Gres=gpu:2(S:0-19)
+   NodeAddr=gpu-001 NodeHostName=gpu-001 Version=24.05.3
+   OS=Linux 5.15.0-173-generic #183-Ubuntu SMP Fri Mar 6 13:29:34 UTC 2026 
+   RealMemory=337920 AllocMem=286720 FreeMem=310471 Sockets=2 Boards=1
+   CoreSpecCount=2 CPUSpecList=9,19 
+   State=MIXED ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=lrz-v100x2 
+   BootTime=2026-04-30T10:13:57 SlurmdStartTime=2026-04-30T10:19:36
+   LastBusyTime=2026-05-05T06:53:50 ResumeAfterTime=None
+   CfgTRES=cpu=18,mem=330G,billing=675886,gres/gpu=2
+   AllocTRES=cpu=16,mem=280G,gres/gpu=2
+   CurrentWatts=0 AveWatts=0
+   
+

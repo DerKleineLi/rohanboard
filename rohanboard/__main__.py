@@ -14,6 +14,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help=f"path to config.toml (default: {DEFAULT_CONFIG_PATH})")
     p.add_argument("--theme", "-t", type=str, default=None,
                    help="theme file name in styles/ or absolute path; overrides [theme].file from config")
+    p.add_argument("--cluster", type=str, default=None,
+                   help="select a specific cluster id from a multi-cluster TOML "
+                        "(default: first cluster). No effect on single-cluster configs.")
     return p.parse_args(argv)
 
 
@@ -22,7 +25,7 @@ def main(argv: list[str] | None = None) -> None:
     cfg = load_config(args.config)
     if args.theme:
         cfg.theme.file = args.theme
-    RohanBoardApp(config=cfg).run()
+    RohanBoardApp(config=cfg, cluster_id=args.cluster).run()
 
 
 if __name__ == "__main__":
