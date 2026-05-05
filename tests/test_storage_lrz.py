@@ -152,3 +152,79 @@ async def test_discover_lrz_storage_handles_missing_dssusrinfo():
     assert "scratch" in labels
     # No containers when dssusrinfo body is empty.
     assert all(lbl in {"home", "scratch"} for lbl in labels)
+
+
+@pytest.mark.asyncio
+async def test_discover_lrz_storage_caps_avail_at_quota_headroom():
+    """Issue #6 — when dssusrinfo overrides total with a quota, the df-
+    reported avail (filesystem-wide) MUST be capped at quota - used.
+
+    Without the cap, /dss/dsshome1's NFS-wide free space (hundreds of TiB)
+    paired with a 100 GB user quota produced a "free 317 TiB / total 100 GB"
+    nonsense reading. After the cap, free_bytes ≤ total_bytes always.
+    """
+    dssusrinfo_text = (FIXTURES / "dssusrinfo_all.txt").read_text()
+    sep = "---DSSUSRINFO_BEGIN---"
+    bash_payload = (
+        "HOME=/dss/dsshome1/03/di35dob\n"
+        "MCML=/dss/mcmlscratch/03/di35dob\n"
+        f"{sep}\n"
+        f"{dssusrinfo_text}"
+    )
+    # df reports MASSIVE free for /dss/dsshome1 (hundreds of TiB); the
+    # user's quota is only 100 GB. The quota - used headroom = 100-89 = 11 GB.
+    huge_df_avail = 317 * 1024**4  # 317 TiB
+    responses = {
+        ("bash",): bash_payload,
+        ("df", "/dss/dsshome1/03/di35dob"):
+            _df_response("/dss/dsshome1/03/di35dob",
+                         total=500_000_000_000_000, used=200_000_000_000_000,
+                         avail=huge_df_avail),
+        ("df", "/dss/mcmlscratch/03/di35dob"):
+            _df_response("/dss/mcmlscratch/03/di35dob",
+                         total=50_000_000_000_000, used=10_000_000_000_000,
+                         avail=40_000_000_000_000),
+        # Container with df overstating avail too.
+        ("df", "/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000"):
+            _df_response("/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000",
+                         total=100 * 1024**4, used=50 * 1024**4,
+                         avail=50 * 1024**4),
+    }
+    ex = FakeExecutor(responses)
+    entries = await discover_lrz_storage(ex)
+    by_label = {e.label: e for e in entries}
+
+    home = by_label["home"]
+    expected_home_headroom = 100_000_000_000 - 89_000_000_000  # 11 GB
+    assert home.avail_bytes == expected_home_headroom, (
+        f"home avail must cap at quota headroom = {expected_home_headroom}, "
+        f"got {home.avail_bytes}"
+    )
+    assert home.avail_bytes <= home.total_bytes, "free must be ≤ total"
+
+    container = by_label["pn25pi-dss-0000"]
+    # Quota: 9733 / 10000 GB used. Headroom = 267 GB. df overstates at 50 TiB.
+    expected_c_headroom = 10_000_000_000_000 - 9_733_000_000_000
+    assert container.avail_bytes == expected_c_headroom
+    assert container.avail_bytes <= container.total_bytes
+
+
+@pytest.mark.asyncio
+async def test_discover_lrz_storage_uses_quota_headroom_when_df_missing():
+    """When df doesn't return for a quota'd path, avail still gets the
+    quota - used headroom (was None previously)."""
+    dssusrinfo_text = (FIXTURES / "dssusrinfo_all.txt").read_text()
+    sep = "---DSSUSRINFO_BEGIN---"
+    bash_payload = (
+        "HOME=/dss/dsshome1/03/di35dob\n"
+        "MCML=/dss/mcmlscratch/03/di35dob\n"
+        f"{sep}\n"
+        f"{dssusrinfo_text}"
+    )
+    # No df response for home — simulates df failing on that path.
+    responses = {("bash",): bash_payload}
+    ex = FakeExecutor(responses)
+    entries = await discover_lrz_storage(ex)
+    by_label = {e.label: e for e in entries}
+    home = by_label["home"]
+    assert home.avail_bytes == 100_000_000_000 - 89_000_000_000

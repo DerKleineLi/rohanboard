@@ -409,13 +409,23 @@ async def discover_lrz_storage(executor: Executor) -> list[StorageEntry]:
     if home_path is not None:
         df_e = df_results.get("home")
         if info.home_used_gb is not None and info.home_quota_gb is not None:
-            # Override total with the soft quota; keep df's avail for the
-            # writable-amount column when present.
-            avail = df_e.avail_bytes if df_e is not None else None
+            # Override total with the soft quota and CAP avail at the quota
+            # headroom. Without the cap, df's avail (which reports the
+            # filesystem-wide free space — hundreds of TiB on /dss/dsshome1)
+            # gets paired with a 100 GB quota total, producing a nonsense
+            # "free > total" reading. The user's actual writable amount is
+            # min(filesystem_avail, quota - used).
+            quota_total = int(info.home_quota_gb * 1_000_000_000)
+            quota_used = int(info.home_used_gb * 1_000_000_000)
+            quota_headroom = max(quota_total - quota_used, 0)
+            if df_e is not None and df_e.avail_bytes is not None:
+                avail = min(df_e.avail_bytes, quota_headroom)
+            else:
+                avail = quota_headroom
             out.append(StorageEntry(
                 label="home",
-                used_bytes=int(info.home_used_gb * 1_000_000_000),
-                total_bytes=int(info.home_quota_gb * 1_000_000_000),
+                used_bytes=quota_used,
+                total_bytes=quota_total,
                 avail_bytes=avail,
                 source="quota",
                 path=str(home_path),
@@ -432,15 +442,22 @@ async def discover_lrz_storage(executor: Executor) -> list[StorageEntry]:
             df_e.label = "scratch"
             out.append(df_e)
 
-    # Containers: prefer dssusrinfo quota over df.
+    # Containers: prefer dssusrinfo quota over df. Cap avail at quota
+    # headroom — same reasoning as home above.
     for c in sorted(info.containers, key=lambda x: x.name):
         df_e = df_results.get(c.name)
         if c.used_gb is not None and c.quota_gb is not None:
-            avail = df_e.avail_bytes if df_e is not None else None
+            quota_total = int(c.quota_gb * 1_000_000_000)
+            quota_used = int(c.used_gb * 1_000_000_000)
+            quota_headroom = max(quota_total - quota_used, 0)
+            if df_e is not None and df_e.avail_bytes is not None:
+                avail = min(df_e.avail_bytes, quota_headroom)
+            else:
+                avail = quota_headroom
             out.append(StorageEntry(
                 label=c.name,
-                used_bytes=int(c.used_gb * 1_000_000_000),
-                total_bytes=int(c.quota_gb * 1_000_000_000),
+                used_bytes=quota_used,
+                total_bytes=quota_total,
                 avail_bytes=avail,
                 source="quota",
                 path=str(c.path),
