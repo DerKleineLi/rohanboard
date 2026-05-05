@@ -117,12 +117,127 @@ def parse_df(text: str, label: str, path: str) -> StorageEntry | None:
     return None
 
 
+def parse_df_multi(text: str, paths: list[str]) -> dict[str, tuple[int, int, int]]:
+    """Parse `df -B1 path1 path2 ... pathN` output into {path → (total, used, avail)}.
+
+    df groups output by mount-point; the "Mounted on" column at the end of
+    each row identifies which path it covers. We index the result by the
+    REQUESTED path (df may return the actual mount-point if the requested
+    path was a sub-directory). Strategy:
+      1. Build a mount-point → row-tuple dict from df output (skip header).
+      2. For each requested path, walk up the directory tree until a
+         mount-point matches. That handles `df /cluster/foo/bar` when the
+         actual mount is `/cluster/foo`.
+
+    Long path lines may continue across two text rows when the Filesystem
+    column overflows — df backslash-wraps them. We detect a row that ONLY
+    contains the filesystem field (one column) and merge it with the
+    NEXT line.
+    """
+    raw_lines = text.splitlines()
+    # Skip the header row(s). df with multiple paths emits ONE header.
+    lines: list[str] = []
+    seen_header = False
+    for ln in raw_lines:
+        if not ln.strip():
+            continue
+        if not seen_header and ln.lstrip().startswith("Filesystem"):
+            seen_header = True
+            continue
+        lines.append(ln)
+
+    # Merge wrapped rows: if a row has exactly 1 token (the filesystem),
+    # join it with the next row's data.
+    merged: list[str] = []
+    i = 0
+    while i < len(lines):
+        parts = lines[i].split()
+        if len(parts) == 1 and i + 1 < len(lines):
+            merged.append(lines[i].rstrip() + " " + lines[i + 1].lstrip())
+            i += 2
+        else:
+            merged.append(lines[i])
+            i += 1
+
+    by_mount: dict[str, tuple[int, int, int]] = {}
+    for ln in merged:
+        parts = ln.split()
+        if len(parts) < 6:
+            continue
+        try:
+            total = int(parts[-5])
+            used = int(parts[-4])
+            avail = int(parts[-3])
+        except ValueError:
+            continue
+        # The last token is the mount point (with no spaces in any
+        # filesystem we care about).
+        mount = parts[-1]
+        by_mount[mount] = (total, used, avail)
+
+    out: dict[str, tuple[int, int, int]] = {}
+    for p in paths:
+        if p in by_mount:
+            out[p] = by_mount[p]
+            continue
+        # Walk up the path tree to find the mount that contains it.
+        # Bounded by path-component count to avoid any pathological loop.
+        cur = p.rstrip("/") or "/"
+        for _ in range(64):
+            if cur in by_mount:
+                out[p] = by_mount[cur]
+                break
+            if cur == "/" or "/" not in cur:
+                break
+            cur = cur.rsplit("/", 1)[0] or "/"
+    return out
+
+
 async def fetch_df(executor: Executor, label: str, path: str) -> StorageEntry | None:
     try:
         out = await executor.run(["df", "-B1", path], timeout=10.0)
     except RuntimeError:
         return None
     return parse_df(out, label=label, path=path)
+
+
+async def fetch_df_multi(
+    executor: Executor,
+    labelled_paths: list[tuple[str, str]],
+) -> list[StorageEntry | None]:
+    """Issue ONE `df -B1 path1 path2 ... pathN` call, return per-path entries.
+
+    This is the COLLECTOR-LAYER coalesce that fixes interaction lag:
+    rather than N round-trips through the per-host Semaphore(1), we send
+    one argv. The order of returned entries matches `labelled_paths`.
+
+    Empty input returns []. On non-zero rc OR empty output, every entry
+    in the returned list is None (callers handle).
+    """
+    if not labelled_paths:
+        return []
+    paths = [p for _, p in labelled_paths]
+    try:
+        out = await executor.run(["df", "-B1", *paths], timeout=15.0)
+    except RuntimeError:
+        return [None] * len(labelled_paths)
+    by_path = parse_df_multi(out, paths)
+    results: list[StorageEntry | None] = []
+    for label, path in labelled_paths:
+        triple = by_path.get(path)
+        if triple is None:
+            results.append(None)
+            continue
+        total, used, avail = triple
+        results.append(StorageEntry(
+            label=label,
+            used_bytes=used,
+            total_bytes=total,
+            avail_bytes=avail,
+            source="df",
+            path=path,
+        ))
+    return results
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -390,18 +505,15 @@ async def discover_lrz_storage(executor: Executor) -> list[StorageEntry]:
         if c.path and str(c.path):
             paths.append((c.name, c.path))
 
-    # df all paths in one round-trip when we have any. df accepts multiple
-    # paths; the parse_df helper takes one path so we run them in parallel
-    # via fetch_df instead — fewer surprises for fstabs that print extra
-    # rows for some paths.
+    # Coalesce all paths into ONE `df -B1 path1 path2 ... pathN` call.
+    # One ssh round-trip vs N — critical for tick latency through
+    # Semaphore(1) (see fetch_df_multi for details).
     df_results: dict[str, StorageEntry | None] = {}
     if paths:
-        results = await asyncio.gather(
-            *[fetch_df(executor, label=lbl, path=str(p)) for lbl, p in paths],
-            return_exceptions=True,
-        )
+        labelled_paths = [(lbl, str(p)) for lbl, p in paths]
+        results = await fetch_df_multi(executor, labelled_paths)
         for (lbl, _p), r in zip(paths, results):
-            df_results[lbl] = r if isinstance(r, StorageEntry) else None
+            df_results[lbl] = r
 
     out: list[StorageEntry] = []
 

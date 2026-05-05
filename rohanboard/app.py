@@ -427,11 +427,11 @@ class RohanBoardApp(App):
                     elif entry_cfg.kind == "auto":
                         prefixes = entry_cfg.prefixes or ["/cluster", "/cluster_HDD"]
                         discovered = await storage.discover_mounts(executor, prefixes)
-                        # df all of them in parallel
-                        results = await asyncio.gather(
-                            *[storage.fetch_df(executor, label, path) for label, path in discovered],
-                            return_exceptions=True,
-                        )
+                        # Coalesce all discovered paths into ONE df call —
+                        # one ssh round-trip instead of N×Semaphore(1)
+                        # serial calls. Drops a refresh tick from
+                        # ~N×RTT to ~1×RTT per host.
+                        results = await storage.fetch_df_multi(executor, discovered)
                         for r in results:
                             if isinstance(r, StorageEntry):
                                 entries.append(r)

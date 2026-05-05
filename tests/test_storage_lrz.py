@@ -55,9 +55,28 @@ class FakeExecutor(Executor):
             return self.responses[key]
         # Fallback: dispatch by argv[0] and the last positional arg.
         if argv[0] == "df":
-            # df -B1 <path> — return the path-keyed canned df.
-            path = argv[-1]
-            return self.responses.get(("df", path), "")
+            # df -B1 path1 path2 ... — concatenate per-path canned rows
+            # under a single header so parse_df_multi can split them.
+            paths = [a for a in argv[1:] if not a.startswith("-")]
+            if not paths:
+                return ""
+            rows: list[str] = []
+            header_used = False
+            for p in paths:
+                resp = self.responses.get(("df", p))
+                if resp is None:
+                    continue
+                # Each canned response has a header on the first non-empty
+                # line; emit it once, then strip it from subsequent rows.
+                lines = [ln for ln in resp.splitlines() if ln.strip()]
+                if not lines:
+                    continue
+                if not header_used:
+                    rows.append(lines[0])
+                    header_used = True
+                for ln in lines[1:]:
+                    rows.append(ln)
+            return "\n".join(rows) + ("\n" if rows else "")
         if argv[0] == "bash":
             return self.responses.get(("bash",), "")
         return ""
