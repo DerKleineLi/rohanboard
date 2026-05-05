@@ -36,22 +36,27 @@ def _state_text(state: str) -> Text:
 
 
 def _gpu_cell(node: Node) -> Text:
-    """Single GPU column — label (kind+vram) then free/alloc/total triple.
+    """Single GPU column — free/alloc/total triple, then label (kind+vram).
 
-    CPU-only node → "—". Single GPU spec → "<kind> <vram>  free / alloc / total"
+    CPU-only node → "—". Single GPU spec → "free / alloc / total  <kind> <vram>"
     (label collapses gracefully when kind or vram is missing — see
     GpuSpec.display). Multiple GPU specs (MIG profiles) → distinct
-    "<label> <triple>" segments comma-joined.
+    "<triple> <label>" segments comma-joined.
+
+    Order is intentional: the numbers are the load-bearing data the user
+    scans for; the kind/vram is the qualifier. Putting numbers first keeps
+    the column visually aligned across rows and makes free-count scanning
+    fast. Same format applies to all clusters (rohan, slurm, lrz, balar).
     """
     if not node.gpus:
         return Text("—", style="dim")
     parts: list[Text] = []
     for g in node.gpus:
         cell = Text()
+        cell.append_text(fat(g.free, g.alloc, g.total))
         label = g.display  # "H100 92GB", "rtx_a6000", or "—"
         if label and label != "—":
-            cell.append(f"{label}  ")
-        cell.append_text(fat(g.free, g.alloc, g.total))
+            cell.append(f"  {label}")
         parts.append(cell)
     out = Text()
     for i, p in enumerate(parts):
@@ -702,7 +707,8 @@ class NodesSummary(Widget):
             out.append("\n")
         out.append("GPU\n")
         for kind, (a, tot) in sorted(t["gpus"].items()):
-            out.append(f"  {kind:<12} ")
+            # Order: triple first, then kind label — matches per-row _gpu_cell.
+            out.append("  ")
             out.append_text(fat(tot - a, a, tot, width=gpu_w))
-            out.append("\n")
+            out.append(f"  {kind}\n")
         body.update(out)
