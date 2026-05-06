@@ -69,6 +69,54 @@ def _one_node(fixture: str):
     return nodes[0]
 
 
+def test_parse_node_unknown_kind_no_fallback():
+    """A kind that's NOT in `_KIND_VRAM_FALLBACK` and lacks hyphenated
+    AvailableFeatures must keep `vram=None` — fallback is opt-in per kind.
+    """
+    block = (
+        "NodeName=fake-future-gpu Arch=x86_64 CPUTot=64 CPUAlloc=0 "
+        "CPULoad=0.0 RealMemory=512000 AllocMem=0 FreeMem=512000\n"
+        "   AvailableFeatures=newgpu_xyz\n"
+        "   Gres=gpu:newgpu_xyz:4\n"
+        "   Partitions=test\n"
+        "   AllocTRES=cpu=0\n"
+        "   State=IDLE\n"
+    )
+    nodes = parse_scontrol_show_node(block)
+    assert len(nodes) == 1
+    g = nodes[0].gpus[0]
+    assert g.kind == "newgpu_xyz"
+    assert g.vram is None
+
+
+def test_parse_node_rohan_kind_gets_static_vram_fallback():
+    """rohan classic: AvailableFeatures lacks hyphen+VRAM, so VRAM comes
+    from the static `_KIND_VRAM_FALLBACK` table. Kind in the table → vram
+    filled in. The original 3ee48b0 issue: LRZ's hyphenated A100-80GB
+    must NOT be overridden by the fallback (regex match wins first), and
+    rohan's bare `a100` AvailableFeatures must get fallback "80GB".
+    """
+    block = (
+        "NodeName=fake-rohan-a100 Arch=x86_64 CPUTot=128 CPUAlloc=0 "
+        "CPULoad=0.0 RealMemory=512000 AllocMem=0 FreeMem=512000\n"
+        "   AvailableFeatures=a100\n"
+        "   Gres=gpu:a100:4\n"
+        "   Partitions=a100_submit\n"
+        "   AllocTRES=cpu=0\n"
+        "   State=IDLE\n"
+    )
+    nodes = parse_scontrol_show_node(block)
+    g = nodes[0].gpus[0]
+    assert g.kind == "a100"
+    assert g.vram == "80GB"   # static fallback
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Issue #5 — MIG node aggregation at NODE level
+# ──────────────────────────────────────────────────────────────────────
+
+
+
 def test_parse_node_lrz_mig_aggregates_at_node_level():
     """MIG node with mixed profiles: AllocTRES gives ONE flat gres/gpu=N
     for the whole node — slurm doesn't break out per profile. We must
