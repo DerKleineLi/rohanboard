@@ -400,3 +400,106 @@ async def test_layout_main_uses_horizontal_in_wide_fit():
                 "#main must use horizontal layout in wide+fit "
                 f"(got {type(main.styles.layout).__name__})"
             )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Issue #3 — runtime layout assertion + columns bottom-align
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("size", [(140, 40), (180, 50)])
+@pytest.mark.parametrize("gpu_kinds,has_hdd",
+                         [(5, True), (7, False)],
+                         ids=["rohan", "lrz"])
+async def test_columns_bottom_align_in_wide_fit(monkeypatch, size, gpu_kinds, has_hdd):
+    """The two columns in wide+fit must bottom-align (within ±1 row).
+
+    Pre-fix: Horizontal let each column be content-sized; the SHORTER
+    column ended early, leaving a 4-row asymmetric gap (user-reported
+    "layout off"). Post-fix: each col is `height: 100%` and ends with
+    a `.col-spacer { height: 1fr }` that absorbs slack INSIDE the
+    shorter column, bottom-aligning both.
+    """
+    monkeypatch.setenv("ROHANBOARD_LAYOUT_ASSERT", "1")
+    w, h = size
+    snap = _make_test_snapshot(gpu_kinds=gpu_kinds, has_hdd=has_hdd, job_count=5)
+    app = _OverviewHostApp(snap)
+    async with app.run_test(size=(w, h)) as pilot:
+        await pilot.pause()
+        from rohanboard.widgets.overview import OverviewPanel
+        panel = app.query_one(OverviewPanel)
+        panel.update_snapshot(snap)
+        await pilot.pause()
+        await pilot.pause()
+        if "wide" not in panel.classes or "fit" not in panel.classes:
+            return
+        try:
+            left = panel.query_one(".left-col")
+            right = panel.query_one(".right-col")
+        except Exception as e:
+            pytest.fail(f".left-col / .right-col not mounted in wide+fit: {e}")
+        lb = left.region.bottom
+        rb = right.region.bottom
+        assert abs(lb - rb) <= 1, (
+            f"At {w}x{h} (gpu_kinds={gpu_kinds}, hdd={has_hdd}): "
+            f"columns diverge — left ends row {lb}, right ends row {rb}, "
+            f"Δ={lb - rb}. The col-spacer at the bottom of each column "
+            f"must absorb slack to bottom-align them."
+        )
+
+
+async def test_runtime_layout_assertion_fires_on_misalignment(monkeypatch):
+    """If a layout regression slipped in (e.g. someone removed the
+    .flex on the last card or set the col height back to auto), the
+    runtime check must RAISE rather than silently render with a gap.
+
+    We simulate a misalignment by patching the cols' children so the
+    "last card" of each has DIFFERENT region.bottom values.
+    """
+    monkeypatch.setenv("ROHANBOARD_LAYOUT_ASSERT", "1")
+    from rohanboard.widgets.overview import OverviewPanel
+    p = OverviewPanel.__new__(OverviewPanel)
+    p._classes = {"wide", "fit"}
+
+    class FakeRegion:
+        def __init__(self, bottom):
+            self.bottom = bottom
+
+    class FakeCard:
+        def __init__(self, bottom):
+            self.region = FakeRegion(bottom)
+
+    class FakeCol:
+        def __init__(self, last_card_bottom):
+            self.region = FakeRegion(99)   # col region itself unused now
+            self.children = [FakeCard(last_card_bottom)]
+
+    def fake_query_one(sel, _cls=None):
+        if sel == ".left-col":
+            return FakeCol(28)   # the v3-plan-measured BEFORE: gap=4
+        if sel == ".right-col":
+            return FakeCol(24)
+        raise AssertionError(f"unexpected query_one selector: {sel!r}")
+
+    p.query_one = fake_query_one  # type: ignore[method-assign]
+    p.has_class = lambda cls: cls in {"wide", "fit"}  # type: ignore[method-assign]
+
+    with pytest.raises(AssertionError, match="bottoms diverge"):
+        p._verify_layout_aligned()
+
+
+async def test_runtime_layout_assertion_off_when_env_unset(monkeypatch):
+    """Production-mode (no env var): assertion must NOT fire even if
+    columns ARE misaligned. The check is dev/CI-only."""
+    monkeypatch.delenv("ROHANBOARD_LAYOUT_ASSERT", raising=False)
+    from rohanboard.widgets.overview import OverviewPanel
+    p = OverviewPanel.__new__(OverviewPanel)
+    # Even with intentionally misaligned columns the call is a no-op.
+    p.has_class = lambda cls: cls in {"wide", "fit"}  # type: ignore[method-assign]
+
+    def bad_query_one(sel, _cls=None):
+        raise RuntimeError("should never be called when env unset")
+
+    p.query_one = bad_query_one  # type: ignore[method-assign]
+    # No raise — env unset short-circuits before query_one.
+    p._verify_layout_aligned()

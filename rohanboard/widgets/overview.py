@@ -10,13 +10,24 @@ Two modes, chosen by width:
                               it is added to whichever column is shorter.
                               ASCII appears below if there is still slack.
 
-In wide+fit mode #main uses `layout: horizontal` (NOT grid) so each
-column sizes to its OWN content — the shorter one doesn't pad to match
-the taller one. Slack is absorbed by `#ascii_row` BELOW #main at 1fr.
+In wide+fit mode #main uses `layout: horizontal` and each column
+contains a `1fr` SPACER widget at its bottom so both columns
+bottom-align. Without the spacer, `Horizontal` lets each column be
+content-sized — the shorter column ends early and leaves a 4-row gap
+before the ASCII pane, which the user reported as "layout off". With
+the spacer, `height: 100%` lets each column stretch to the Horizontal's
+height (= max of natural heights), and the spacer absorbs the slack
+INSIDE the shorter column. Bottom-align achieved.
+
+Runtime check: when `ROHANBOARD_LAYOUT_ASSERT=1`, `_verify_layout_aligned`
+asserts left.region.bottom == right.region.bottom (±1) after every
+populate / on_mount / on_resize. Disabled in production for cost; on
+in CI + dev runs.
 """
 from __future__ import annotations
 
 import datetime as _dt
+import os
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -266,23 +277,29 @@ class OverviewPanel(Widget):
     OverviewPanel.scroll .card { margin-bottom: 0; }
     OverviewPanel #ascii_row.hidden { display: none; }
 
-    /* ── WIDE + fit: 2 INDEPENDENT-HEIGHT columns side by side ────────
-       The 2026-05-06 layout fix.  Was: `layout: grid` with `grid-size: 2`.
-       Problem: a 2-cell grid row's height is `max(left_nat, right_nat)`,
-       and the SHORTER column's children pack at the TOP — the bottom of
-       the shorter column gets bare `│ … │` border padding (the user-
-       reported "2-line gap below HomeStorage / Util card"). There is no
-       grid knob for "let each column be its own height".
+    /* ── WIDE + fit: 2 BOTTOM-ALIGNED columns side by side ────────────
+       The 2026-05-06 v3 layout fix.  Iteration history:
+         v1 (original):        layout: grid; grid-size: 2 — padded the
+                               SHORTER column with bare borders below
+                               its content (user reported "2-line gap").
+         v2 (87ed9cc):         layout: horizontal + height: auto on the
+                               cols. Each column sized to ITS OWN
+                               content — no padding, but the shorter
+                               column ended early, leaving an asymmetric
+                               4-row gap before the ASCII pane (user
+                               reported "layout is off").
+         v3 (this file):       layout: horizontal + #main pinned to
+                               max(left_nat, right_nat) imperatively
+                               + last card in each column gets
+                               `.flex` (height: 1fr) so it STRETCHES
+                               to fill its column's remaining vertical
+                               slack. Result: both columns end at the
+                               same row, the LAST CARD's `╰` is at
+                               col-bottom-1 (bordered), no bare gap.
 
-       Fix: replace grid with `layout: horizontal`. Two `width: 1fr`
-       Verticals let each column size to ITS OWN content — the shorter
-       column ends precisely where its content ends, no padding inside
-       the row.  The Horizontal itself is `height: auto`, so #main sizes
-       to the TALLER column.  The `#ascii_row` BELOW (still `1fr`)
-       absorbs whatever vertical slack remains. Result: no gap on
-       either side; the visual bottom of both columns can differ but
-       neither is padded with bare border, and the ASCII pane spans
-       full width below. */
+       Runtime check (env-gated): ROHANBOARD_LAYOUT_ASSERT=1 enables
+       `_verify_layout_aligned`, which raises AssertionError if the two
+       columns' last-CARD bottoms differ by more than 1 row. */
     OverviewPanel.wide.fit #main {
         layout: horizontal;
         height: auto;
@@ -291,22 +308,28 @@ class OverviewPanel(Widget):
     OverviewPanel.wide.fit #main > .col {
         layout: vertical;
         width: 1fr;
-        height: auto;
+        /* Stretch each column to the Horizontal's height (= max of the
+           two natural heights, set imperatively from _populate). The
+           last card in each column has `.flex` (height: 1fr) so it
+           absorbs the slack to bottom-align the visible card border. */
+        height: 100%;
     }
     /* Spacer between the two columns. Applied to the FIRST column so
        only the gap between them is created (no trailing margin past
-       the right column). `:first-of-type` is the Textual selector for
-       the first child of the parent that matches the `.col` class. */
+       the right column). */
     OverviewPanel.wide.fit #main > .col:first-of-type {
         margin-right: 1;
     }
-    /* Inside fit mode, no card stretches — they all sit at natural
-       height and the ASCII pane below absorbs the slack. The widget-
-       level DEFAULT_CSS on UtilizationPanel et al sets `height: 1fr`
-       (a holdover from the OLD shared-row layout); we override that
-       here AND we also clear `.flex` imperatively in _populate when
-       in fit mode (textual widget-class CSS otherwise wins). */
-    OverviewPanel.wide.fit #main > .col > .card.flex { height: auto; }
+    /* In fit mode, the LAST card in each column gets `.flex` from
+       _populate — it stretches to fill the column's vertical slack
+       so the visible `╰` border is at col_bottom-1, not at content-
+       natural-end. Without this, the shorter column has 4-5 blank
+       rows below its last card before the ASCII pane (user-reported
+       "layout off" gap). */
+    OverviewPanel.wide.fit #main > .col > .card.flex {
+        height: 1fr;
+        min-height: 0;
+    }
 
     /* ── NARROW or scroll: stack at natural heights ─────────────────── */
     OverviewPanel.narrow #main, OverviewPanel.scroll #main {
@@ -404,7 +427,14 @@ class OverviewPanel(Widget):
         )
         # re-layout may be needed if util fit-check flipped
         self._relayout()
-        self._push_snapshot()
+        # Defer the per-child push until AFTER the refresh — newly-mounted
+        # cards from `_populate` haven't finished compose() yet, so a
+        # synchronous push would call `query_one(...)` against half-mounted
+        # widgets and silently drop. `call_after_refresh` waits for
+        # the next paint to fire `_push_snapshot`. Without this the LRZ
+        # Overview stays stuck on "loading…" forever — the snapshot is
+        # delivered but lost in the layout-mid-flight race.
+        self.call_after_refresh(self._push_snapshot)
 
     # ── layout decision ──────────────────────────────────────
 
@@ -490,14 +520,17 @@ class OverviewPanel(Widget):
             self.remove_class(cls)
         self.add_class(mode)
         self.add_class("fit" if fit else "scroll")
-        # No imperative height anymore — fit mode lets #main size to its
-        # natural content (height: auto in CSS) and #ascii_row at 1fr
-        # absorbs the remaining vertical slack. The previous imperative
-        # `main.styles.height = target = max(left_nat, right_nat)` was
-        # the root cause of the 1–3 row gap below HomeStorage on rohan:
-        # the right column's flex Util card pushed shared row height
-        # past target, leaving the left column under-filled.
-        main.styles.height = None
+        # In wide+fit mode pin `#main` to the max of the two columns'
+        # natural heights so the columns' `height: 100%` rule has a
+        # concrete value to anchor on. Without this, Horizontal's
+        # `height: auto` + children's `height: 100%` is circular and
+        # Textual collapses both to 0. We pre-compute the target
+        # in `_relayout` and pass it through `self._last_layout`.
+        # `#ascii_row` at 1fr absorbs whatever total slack remains.
+        if fit and mode == "wide":
+            main.styles.height = target
+        else:
+            main.styles.height = None
 
         if mode == "narrow":
             # Single col, all natural — overflow handled by parent scroll.
@@ -505,42 +538,107 @@ class OverviewPanel(Widget):
             main.mount(_card(HomeStorage()))
             main.mount(_card(CompactJobs()))
         else:
-            # Wide+fit: two independent-height columns side-by-side via
-            # `layout: horizontal` (set in CSS). The CSS `> .col` rule
-            # styles each at `width: 1fr; height: auto`; the
-            # `:first-of-type` rule adds the inter-column spacer.
+            # Wide+fit: two BOTTOM-ALIGNED columns side-by-side via
+            # `layout: horizontal` + `.col { height: 100% }` + the
+            # LAST card in each column getting `.flex` (height: 1fr)
+            # so it stretches to fill the column's vertical slack.
+            # Result: both columns visually end at the same row;
+            # the last card's `╰` border is one row above col bottom.
             col_left = Vertical(classes="col left-col")
             col_right = Vertical(classes="col right-col")
             main.mount(col_left)
             main.mount(col_right)
 
-            # In wide+fit mode the columns are CONTENT-SIZED — no card
-            # stretches; ASCII pane below (`#ascii_row` at `1fr`) absorbs
-            # the slack.  UtilizationPanel's DEFAULT_CSS sets `height:
-            # 1fr` at the widget-class level (designed for the OLD
-            # shared-row layout) — we bound it imperatively to a fixed
-            # natural height (UTIL_MIN_HEIGHT = 13) so the column it
-            # lives in remains content-sized.  Util is shown only when
-            # there's enough vertical slack on the SHORTER column to
-            # accommodate it (util_side decision elsewhere).
-            col_left.mount(_card(NodesSummary()))
+            # Build the per-column card lists, then flex the LAST one
+            # so it absorbs the slack inside its column.
+            left_cards: list[Widget] = [NodesSummary()]
             if util_side == "left":
-                col_left.mount(_card(HomeStorage()))
-                col_left.mount(_card(self._make_util()))
+                left_cards.append(HomeStorage())
+                left_cards.append(self._make_util())
             else:
-                col_left.mount(_card(HomeStorage()))
+                left_cards.append(HomeStorage())
 
+            right_cards: list[Widget] = [CompactJobs()]
             if util_side == "right":
-                col_right.mount(_card(CompactJobs()))
-                col_right.mount(_card(self._make_util()))
-            else:
-                col_right.mount(_card(CompactJobs()))
+                right_cards.append(self._make_util())
+
+            # Flex (height: 1fr) the LAST card in each column. Without
+            # this, the shorter column ends at its content-natural row
+            # and the user sees a bare 4-row gap before the ASCII pane
+            # (user-reported "layout is off"). Note: Util has its own
+            # imperative `styles.height = UTIL_MIN_HEIGHT` from
+            # _make_util — clear that on the Util card if it ends up
+            # last so the .flex CSS rule wins.
+            for card in left_cards[:-1]:
+                col_left.mount(_card(card))
+            last_left = left_cards[-1]
+            last_left.styles.height = None  # let .flex CSS rule resolve 1fr
+            col_left.mount(_card(last_left, flex=True))
+
+            for card in right_cards[:-1]:
+                col_right.mount(_card(card))
+            last_right = right_cards[-1]
+            last_right.styles.height = None
+            col_right.mount(_card(last_right, flex=True))
 
         if show_ascii:
             ascii_row.remove_class("hidden")
             ascii_row.mount(self._make_decor(ascii_budget))
         else:
             ascii_row.add_class("hidden")
+
+        # Runtime layout check (issue #3): when ROHANBOARD_LAYOUT_ASSERT=1
+        # is set, after the next refresh fires `_verify_layout_aligned`
+        # asserts the two columns' rendered bottoms match. Off in
+        # production for cost; on for CI + dev runs where a regression
+        # in the layout would otherwise fail silently with a 4-row gap.
+        if mode != "narrow":
+            self.call_after_refresh(self._verify_layout_aligned)
+
+    def _verify_layout_aligned(self) -> None:
+        """Runtime layout assertion (env-gated): in wide+fit mode, the
+        two columns' LAST CARD bottoms MUST align. Raises AssertionError
+        on regression.
+
+        Triggered by `ROHANBOARD_LAYOUT_ASSERT=1`. Wired into
+        `_populate` (after refresh) so any layout-affecting change
+        re-fires the check. Off by default — production users don't
+        want a TUI crash on a borderline layout case; CI/dev runs do.
+
+        The check tolerates `±1` row of rounding (Textual's region.bottom
+        is integer rows, but column heights in fr units can round
+        to a 1-row boundary). A divergence of 2+ rows is a real bug —
+        per the v3 plan's measured 4-row gap pre-fix. We check the
+        LAST CARD's bottom, not the col's, because what the user sees
+        is the visible `╰` border of the last card.
+        """
+        if os.environ.get("ROHANBOARD_LAYOUT_ASSERT") != "1":
+            return
+        if not (self.has_class("wide") and self.has_class("fit")):
+            return
+        try:
+            left = self.query_one(".left-col", Vertical)
+            right = self.query_one(".right-col", Vertical)
+        except Exception:
+            return
+        # Compute each col's last card's bottom. The Vertical's children
+        # are in mount order; the LAST one is the .flex card whose `╰`
+        # the user sees as the col bottom.
+        try:
+            last_left = list(left.children)[-1]
+            last_right = list(right.children)[-1]
+        except Exception:
+            return
+        lb = last_left.region.bottom
+        rb = last_right.region.bottom
+        if abs(lb - rb) > 1:
+            raise AssertionError(
+                f"OverviewPanel column bottoms diverge: "
+                f"left ends at row {lb}, right ends at row {rb}, "
+                f"Δ={lb - rb} rows. Expected ±1 (the .flex last card "
+                f"should stretch to fill its column so both visible "
+                f"`╰` borders bottom-align)."
+            )
 
     def _make_util(self) -> Widget:
         """Build a UtilizationPanel and pin its height so it doesn't
