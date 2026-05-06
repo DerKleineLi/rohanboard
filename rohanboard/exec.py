@@ -201,10 +201,19 @@ class SSHExecutor:
         the socket; the master dies with the python process.
     """
 
+    # ServerAliveInterval=20 / Count=3 → dead-server detection in ~60 s
+    # (was 30/3 = 90 s). LRZ kills idle TCP sessions silently; with the
+    # old 90 s window the client kept thinking the mux was alive while
+    # the server side had GC'd it, producing the "another probe is
+    # already in flight" wedge until the rest of the chain timed out.
+    # ConnectTimeout=10 bounds the cold-handshake (ProxyJump-via-
+    # lrzlogin path) so a fully unreachable cluster fails fast rather
+    # than blocking the master-warm budget for 30 s.
     _DEFAULT_OPTS: tuple[str, ...] = (
         "-o", "BatchMode=yes",
-        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveInterval=20",
         "-o", "ServerAliveCountMax=3",
+        "-o", "ConnectTimeout=10",
         "-o", "ControlMaster=auto",
     )
 
@@ -369,6 +378,41 @@ class SSHExecutor:
         self._unlink_wedged_socket()
         self._master_ready = False
 
+    def _mark_mux_dead(self) -> None:
+        """Tear down the mux state so the NEXT call re-warms from scratch.
+
+        Called when the running ssh subprocess timed out / was cancelled in
+        a way that suggests the underlying TCP / mux is broken (slow LRZ
+        kill, network blip during a multi-second collect). Without this,
+        the next call's `_warm_master` would see `_master_ready=True`,
+        run `ssh -O check` against a dead socket (which may itself hang
+        beyond its 3 s timeout), and waste another tick.
+
+        Best-effort + sync: kicks off `ssh -O exit` in the background
+        (via the `asyncio.to_thread` wrapper if a loop is running, or
+        the synchronous subprocess otherwise) and unlinks the socket
+        immediately. Either way, by the time the next `_warm_master`
+        runs, `_master_ready` is False — that's the load-bearing flip.
+        """
+        if not self._master_ready and not os.path.exists(
+                self.control_path.replace("%h", self.host)):
+            return
+        self._master_ready = False
+        # Best-effort ssh -O exit; bound to 2s so a hung mux doesn't
+        # block the cleanup. Failure is OK — the unlink below catches
+        # the leftover socket file.
+        try:
+            subprocess.run(
+                self._mux_ctl_argv("exit"),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+            )
+        except Exception:
+            log.debug("ssh -O exit during mark_dead failed for %s",
+                      self.host, exc_info=True)
+        self._unlink_wedged_socket()
+
     # ────────────────────────────────────────────────────────────────────
     # cmd construction
     # ────────────────────────────────────────────────────────────────────
@@ -395,14 +439,10 @@ class SSHExecutor:
     # warm + run
     # ────────────────────────────────────────────────────────────────────
 
-    async def _warm_master(self, timeout: float) -> None:
-        """Serialize ControlMaster creation. First refresher creates the master;
-        the others wait and then reuse the socket.
-
-        Pre-flight: if `_master_ready` is set but the mux on disk is dead
-        (e.g. ssh server died, network blip, ControlPersist expired between
-        ticks), we wipe state and re-warm from scratch.
-        """
+    async def _warm_master_inner(self, timeout: float) -> None:
+        """Inner master-warm body. Caller wraps in `asyncio.shield` to
+        protect from `run_worker(exclusive=True)` cancellation while a
+        slow ProxyJump connection (LRZ ~10.5 s cold) is in flight."""
         # Lazily build the lock — `__init__` runs outside the event loop.
         if self._master_lock is None:
             self._master_lock = asyncio.Lock()
@@ -418,9 +458,9 @@ class SSHExecutor:
                 log.info("ssh mux for %s is wedged; tearing down and re-warming", self.host)
                 self._master_ready = False
                 self._unlink_wedged_socket()
-            # Cheap probe through the master path. ServerAliveInterval=30 means
-            # this echo also exercises the same options as real calls. If the
-            # master already exists from a prior process, this is a fast reuse.
+            # Cheap probe through the master path. The `echo` exercises the
+            # same options as real calls; if a prior process left the master
+            # warm we get a fast reuse.
             cmd = self._build_cmd(["echo", "_rb_ssh_warm_"])
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -447,6 +487,32 @@ class SSHExecutor:
                 )
             self._master_ready = True
 
+    async def _warm_master(self, timeout: float) -> None:
+        """Serialize ControlMaster creation. First refresher creates the
+        master; the others wait and then reuse the socket.
+
+        Pre-flight: if `_master_ready` is set but the mux on disk is dead
+        (e.g. ssh server died, network blip, ControlPersist expired between
+        ticks), we wipe state and re-warm from scratch.
+
+        Cancellation policy (issue #3): the master-warm path is wrapped in
+        `asyncio.shield` so a `run_worker(exclusive=True)` cancellation
+        from the next refresh tick can't tear it down mid-handshake (LRZ
+        ProxyJump cold = ~10.5 s; tick interval = 5 s). The shield is
+        bounded by the same `timeout` budget, so a permanently-stuck warm
+        eventually surfaces as a timeout to the caller — without
+        accumulating zombie children behind the per-host semaphore.
+        """
+        try:
+            await asyncio.shield(self._warm_master_inner(timeout))
+        except asyncio.TimeoutError:
+            # If the inner timed out, mark the mux dead so the NEXT call
+            # re-warms from scratch instead of trusting a half-baked state.
+            self._mark_mux_dead()
+            raise RuntimeError(
+                f"ssh {self.host} master-warm timed out after {timeout}s"
+            )
+
     async def run(self, argv: list[str], timeout: float = 15.0) -> str:
         # Per-host in-flight cap: at most one ssh probe in flight per host.
         # A hanging probe blocks the next dispatch (caller hits its own
@@ -463,6 +529,7 @@ class SSHExecutor:
                 f"ssh {self.host}: another probe is already in flight "
                 f"(timeout={timeout}s waiting for semaphore)"
             )
+        timed_out = False
         try:
             # Master-warm budget gets the larger of (timeout, 30s) to cover
             # the cold ProxyJump path on a slow link without forcing every
@@ -475,6 +542,7 @@ class SSHExecutor:
                 stderr=asyncio.subprocess.PIPE,
             )
             cancelled = False
+            timed_out = False
             # Catch ALL exceptions (including asyncio.CancelledError from
             # `run_worker(exclusive=True)` cancelling us, and TimeoutError
             # from the wait_for) — must kill+reap the subprocess in every
@@ -482,6 +550,23 @@ class SSHExecutor:
             # next tick spawns yet another one (the slurm-quota stack-up).
             try:
                 out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                # Per-call timeout (issue #3): the underlying TCP / mux is
+                # likely dead; mark mux dead so the NEXT call re-warms.
+                # Suppresses the cascading "another probe is in flight"
+                # error chain on LRZ when the connection goes silent.
+                cancelled = True
+                timed_out = True
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.shield(proc.wait())
+                    except BaseException:
+                        pass
+                raise
             except BaseException:
                 cancelled = True
                 if proc.returncode is None:
@@ -508,6 +593,14 @@ class SSHExecutor:
                 )
             return out.decode(errors="replace")
         finally:
+            # On a per-call timeout, schedule mux teardown OFF the critical
+            # path so the next caller doesn't have to wait for `ssh -O exit`.
+            if timed_out:
+                try:
+                    await asyncio.to_thread(self._mark_mux_dead)
+                except Exception:
+                    log.debug("mark_mux_dead post-timeout failed for %s",
+                              self.host, exc_info=True)
             self._inflight.release()
 
     async def whoami(self) -> str:

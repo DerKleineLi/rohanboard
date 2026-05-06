@@ -549,6 +549,13 @@ async def test_ssh_executor_kills_subprocess_on_cancellation():
 
     ex = SSHExecutor(host="cancel-host")
     ex._master_ready = True  # bypass warm
+    # Stub the mux-check so warm-master short-circuits without actually
+    # ssh-O-checking; otherwise warm spawns the HangProc itself (instead
+    # of the actual command) and the shield-around-warm now blocks the
+    # cancel from propagating into THAT subprocess. We're testing the
+    # COMMAND-path subprocess gets killed; warm-path is covered by
+    # test_ssh_executor_warm_master_shielded_from_outer_cancel.
+    ex._mux_check_blocking = lambda *_a, **_k: True
 
     with patch("rohanboard.exec.asyncio.create_subprocess_exec", new=fake_create):
         task = _asyncio.create_task(ex.run(["echo", "hi"], timeout=60.0))
