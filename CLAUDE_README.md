@@ -186,3 +186,43 @@
 - `61f11cd` storage: coalesce LRZ discover into ONE ssh round-trip
 - `93ac41c` overview: content-sized columns + 1fr ASCII slack absorber
 - `9f17161` nodes: canonical GPU kind format across clusters
+
+## 4-issue v2 fixes (since 2026-05-06)
+
+### Wide+fit Overview: `Horizontal` not `grid` (#2 v2)
+- The 93ac41c "content-sized columns + 1fr ASCII slack absorber" used `layout: grid; grid-size: 2`. CSS grid rows always pad SHORTER columns to the row's max-child height, leaving bare-border padding below the shorter column (the user-reported "2-line gap below HomeStorage / Util card"). There is no grid knob for "let each column be its own height."
+- v2 fix: `layout: horizontal` with two `width: 1fr` Verticals. Each column sizes INDEPENDENTLY to its own content; `#main` is `height: auto` (= taller column); `#ascii_row` BELOW is still `1fr` and absorbs vertical slack. The `:first-of-type` selector adds the inter-column spacer.
+- General Textual rule: **for two columns of independent height with a slack region BELOW, use `Horizontal(left, right)` + a `1fr` widget below — NOT `grid`.** Grid is for tabular layouts where ROW alignment is desired; for column-stacked cards with different heights it produces visible padding bugs.
+- Tests: `tests/test_overview_layout.py` — seven new Pilot-based tests mount a real OverviewPanel inside a stub App at 100x30 / 140x40 / 180x50 (rohan-shape and LRZ-shape), introspect post-mount widget regions, and assert each `.col`'s last child's bottom is no more than 1 row above the column's own bottom. Plus a sanity-check that `#main` resolves to HorizontalLayout in fit mode.
+- See commit `87ed9cc` overview: replace grid with horizontal layout for independent column heights.
+
+### LRZ ssh detect-and-reconnect (#3)
+- Problem: ServerAliveInterval=30/Count=3 = 90 s for the client to notice LRZ silently killed the TCP connection. Combined with `_warm_master(timeout=30)` > tick interval (5 s) on a cold ProxyJump (10.5 s), every tick gets cancelled mid-handshake by `run_worker(exclusive=True)`, the cancel-teardown holds the per-host semaphore, and the next tick surfaces "another probe is already in flight" while waiting up to 15 s for the semaphore.
+- Fixes:
+  1. **Tighter ssh opts (`_DEFAULT_OPTS`)**: `ServerAliveInterval=20`, `ServerAliveCountMax=3` (~60 s detection vs 90 s); `ConnectTimeout=10` bounds the cold-handshake.
+  2. **Shielded `_warm_master`**: split into `_warm_master_inner` + outer wrapper that runs the inner inside `asyncio.shield`. A `run_worker(exclusive=True)` cancel from the next refresh tick now propagates to the awaiter (CancelledError) but the inner subprocess keeps running to completion — the next tick reuses the same warm. The inner is bounded by its own timeout (default `max(timeout, 30s)`); on timeout `_mark_mux_dead` is called.
+  3. **`_mark_mux_dead` helper**: sync, best-effort `ssh -O exit` (2 s budget) + unlink socket + flip `_master_ready=False`. Called from `_warm_master`'s TimeoutError path AND from explicit teardown (e.g. shutdown). NOT called from per-call TimeoutError — a slow-but-reachable cluster (busy LRZ scontrol) shouldn't tear down its mux just because the call exceeded 15 s; the warm-master pre-flight `ssh -O check` catches a truly-dead mux on the next call.
+- Cold/warm timing budget: cold first tick on LRZ ~10.5 s warm + actual call; subsequent ticks <2 s. If you see "another probe is already in flight" on the LRZ tab, that's the SECOND tick's wait_for-acquire timing out behind a still-warming first tick. It clears on the third tick.
+- Tests: `tests/test_exec.py` — `test_ssh_executor_run_per_call_timeout_does_NOT_mark_mux_dead` (slow != broken; mux must persist), `test_ssh_executor_recovers_after_timeout_on_next_call` (first call hangs → TimeoutError; second call succeeds with warm mux still up), `test_ssh_executor_warm_master_shielded_from_outer_cancel` (inner runs to natural completion despite outer cancel). Existing `test_ssh_executor_kills_subprocess_on_cancellation` patched to stub `_mux_check_blocking` so cancel hits the COMMAND path (still cancellable end-to-end), not the now-shielded warm.
+- See commit `ca9b1f8` exec: per-call timeout marks mux dead + shielded warm-master + follow-up `<NEW>` exec: don't mark mux dead on slow-call timeout.
+
+### Static VRAM fallback for kinds without hyphenated AvailableFeatures (#4 v2)
+- 9f17161 introduced `_norm_kind` for canonical render labels but didn't address the **upstream** issue: rohan reports `AvailableFeatures=rtx_a6000` (no hyphen+VRAM suffix), so `_AVAIL_FEAT_GPU_RE = ^([A-Za-z0-9]+)-(\d+...)$` doesn't match and `g.vram` stays None. Render shows `RTX_A6000` instead of `RTX_A6000 48GB`.
+- Fix: `_KIND_VRAM_FALLBACK` static dict in `collectors/slurm.py`, keyed by lowercased Gres-kind. Applied AFTER the AvailableFeatures resolution path — a hyphenated cluster (LRZ A100-80GB) is never overridden; unknown kinds fall through to vram=None.
+- Default entries: `a100→80GB, a6000→48GB, rtx_a6000→48GB, rtx_3090→24GB, rtx_2080→11GB, gtx_1080→8GB, h100→80GB, v100→32GB, p100→16GB`. **Extend** when adding a new cluster whose `AvailableFeatures` lacks `<kind>-<VRAM>` AND the kind isn't in the dict. Keep MIG profiles OUT — they already encode VRAM in the kind itself (`3g.20gb`).
+- Tests: rohan a100/a6000 now assert `"80GB"`/`"48GB"`; LRZ A100-80GB regression test confirms native VRAM wins over the table; unknown-kind test confirms opt-in-per-kind behavior.
+- See commit `3ee48b0` slurm: static VRAM fallback for kinds without hyphenated AvailableFeatures.
+
+### Burst-keys input-lag test (#1)
+- Pilot-based test in `tests/test_app_multi_cluster.py`: bursts `1,2,3,4` at 30 ms intervals against an app with a slow LRZ executor (8 s/call). Asserts the LAST press lands on the storage tab within 200 ms.
+- Post-#3 the test passes at ~10 ms residual lag (the asyncio-sleep slow-executor doesn't actually block the loop, so the test guards the high-level invariant that an awaitable-slow cluster doesn't block input handling). PRE-#3 lag in the live tmux app was 300-500 ms (cancel-storm + subprocess teardown stalling the loop); the #3 shield + per-call timeout + mark-mux-dead removed that storm.
+- Manual stronger reproduction (NOT in CI): `tmux send-keys -t rohan:rohanboard-debug-2 1 1 2 3 4` + capture-pane after 100/200/500 ms. Recipe documented in the test docstring.
+- Per the v2 plan's STOP guideline (residual lag < threshold post-#3 alone), no separate #1-only fix landed.
+- See commit `ba3da9d` tests: burst-keys input-lag guard for issue #1.
+
+### Recent change log (continued)
+- `3ee48b0` slurm: static VRAM fallback for kinds without hyphenated AvailableFeatures (#4 v2)
+- `87ed9cc` overview: replace grid with horizontal layout for independent column heights (#2 v2)
+- `ca9b1f8` exec: per-call timeout marks mux dead + shielded warm-master (#3)
+- `ba3da9d` tests: burst-keys input-lag guard for issue #1
+- `dcb4ac1` exec: don't mark mux dead on slow-call timeout (only on warm-timeout)
