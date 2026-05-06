@@ -134,13 +134,12 @@ async def test_refresh_keeps_snapshots_per_cluster():
     drive `_refresh_all` and confirm `app.snapshots[cid]` contains that
     cluster's data and ONLY that cluster's data.
 
-    The collectors are dispatched by the executor passed in — we tag the
-    LocalExecutor instances with a sentinel attribute and inspect it.
+    Drives the bulk_run path (since 2026-05-06): patches `executor.bulk_run`
+    to return canned squeue/sacct/scontrol text per executor; the
+    orchestrator parses each and assembles the per-cluster Snapshot.
 
     `_broadcast_to_cluster` is patched out (no widget tree mounted).
     """
-    from rohanboard.collectors.models import Node
-
     cfg = _make_multi_config()
     # Tag each cluster's executor so we can dispatch off it in the fakes.
     cfg.clusters[0].executor._tag = "rohan"  # type: ignore[attr-defined]
@@ -148,35 +147,38 @@ async def test_refresh_keeps_snapshots_per_cluster():
 
     app = RohanBoardApp(config=cfg)
 
-    def make_node(name: str) -> Node:
-        return Node(
-            name=name, partitions=[], state="IDLE",
-            cpu_total=4, cpu_alloc=0, cpu_load=0.0,
-            mem_total_mb=1024, mem_alloc_mb=0, mem_free_mb=1024,
-            gpus=[],
+    # scontrol show node text — only the fields we care about
+    # (NodeName + counts) are required to round-trip through the parser.
+    def _node_block(name: str) -> str:
+        return (
+            f"NodeName={name} CoresPerSocket=2 "
+            f"CPUAlloc=0 CPUTot=4 CPULoad=0.00 "
+            f"AvailableFeatures=(null) ActiveFeatures=(null) Gres=(null) "
+            f"NodeAddr={name} NodeHostName={name} OS=Linux "
+            f"RealMemory=1024 AllocMem=0 FreeMem=1024 "
+            f"Partitions=p1 State=IDLE ThreadsPerCore=1 TmpDisk=0 Weight=1\n"
         )
 
-    fake_nodes = {
-        "rohan": [make_node("rohan-node-1")],
-        "lrz":   [make_node("lrz-node-1"), make_node("lrz-node-2")],
+    canned_nodes = {
+        "rohan": _node_block("rohan-node-1"),
+        # scontrol separates node entries with a blank line.
+        "lrz":   _node_block("lrz-node-1") + "\n" + _node_block("lrz-node-2"),
     }
 
-    async def fake_fetch_jobs(executor, users):
-        return []
-
-    async def fake_fetch_nodes(executor):
-        tag = getattr(executor, "_tag", "rohan")
-        return list(fake_nodes[tag])
-
-    async def fake_fetch_recent(executor, users):
-        return []
+    async def fake_bulk_run(self, name_to_argv, timeout=30.0):
+        tag = getattr(self, "_tag", "rohan")
+        out = {}
+        for k in name_to_argv:
+            if k == "nodes":
+                out[k] = canned_nodes[tag]
+            else:
+                out[k] = ""    # empty squeue/sacct → empty parsed list
+        return out
 
     async def noop_broadcast(_cid, _snap):
         return None
 
-    with patch("rohanboard.app.slurm.fetch_jobs", new=fake_fetch_jobs), \
-         patch("rohanboard.app.slurm.fetch_nodes", new=fake_fetch_nodes), \
-         patch("rohanboard.app.slurm.fetch_recent_jobs", new=fake_fetch_recent), \
+    with patch.object(LocalExecutor, "bulk_run", new=fake_bulk_run), \
          patch.object(app, "_broadcast_to_cluster", new=noop_broadcast):
         await app._refresh_all()
 

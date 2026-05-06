@@ -337,3 +337,207 @@ async def test_ssh_executor_warm_master_shielded_from_outer_cancel():
         "shielded warm-master inner must not see CancelledError from the "
         "outer task cancel"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Issue #2 — bulk_run coalesces per-cluster collector ssh fan-out
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_bulk_run_reduces_n_ssh_calls_to_one():
+    """4 collector commands must be packed into ONE ssh subprocess call.
+
+    Previous (broken) pattern: 4 × executor.run inside asyncio.gather
+    serialised behind Semaphore(1) per host = 4 × per-call latency.
+    For LRZ (~1.4 s warm-call) that's 5.6 s, busting the 5 s tick budget
+    and getting cancelled by run_worker(exclusive=True).
+
+    Fix: bulk_run packs all 4 into a sentinel-framed bash pipeline →
+    ONE asyncio.create_subprocess_exec call → ONE Semaphore acquisition.
+    """
+    proc_count = {"n": 0}
+    captured_argv = []
+
+    class FrameProc:
+        returncode = 0
+
+        def __init__(self, argv):
+            self.argv = argv
+
+        async def communicate(self):
+            # Synthesize a sentinel-framed response. argv[-1] is the
+            # bash -c script; we extract the names after RBOUTBEGIN.
+            import re as _re
+            script = self.argv[-1]
+            # Find the literal token via the first echo, then synthesize
+            # a fake output for each name in order.
+            m = _re.findall(r"---RBOUTBEGIN:([0-9a-f]+):([^-]+)---", script)
+            out_parts = []
+            for token, name in m:
+                out_parts.append(f"---RBOUTBEGIN:{token}:{name}---")
+                out_parts.append(f"<output for {name.strip()}>")
+                out_parts.append(f"---RBOUTEND:{token}:{name}---")
+            return ("\n".join(out_parts).encode(), b"")
+
+        def kill(self): pass
+        async def wait(self): return 0
+
+    async def fake_create(*args, **kwargs):
+        proc_count["n"] += 1
+        captured_argv.append(list(args))
+        last = args[-1] if args else ""
+        # Master-warm probe: trivial OK.
+        if "_rb_ssh_warm_" in last:
+            class Warm:
+                returncode = 0
+                async def communicate(self): return (b"_rb_ssh_warm_\n", b"")
+                def kill(self): pass
+                async def wait(self): return 0
+            return Warm()
+        return FrameProc(args)
+
+    ex = SSHExecutor(host="bulk-test-host")
+
+    name_to_argv = {
+        "jobs":    ["squeue", "-h"],
+        "recent":  ["sacct", "-X", "-P", "-n"],
+        "nodes":   ["scontrol", "show", "node", "--all"],
+        "storage": ["bash", "-lc", "df -B1 /home"],
+    }
+
+    with patch("rohanboard.exec.asyncio.create_subprocess_exec", new=fake_create):
+        out = await ex.bulk_run(name_to_argv, timeout=5.0)
+
+    # Master-warm + ONE bulk subprocess. Previous gather pattern would
+    # have been 4 separate subprocess calls (or 5 with warm).
+    assert proc_count["n"] == 2, (
+        f"expected 1 warm + 1 bulk = 2 subprocess calls; got {proc_count['n']}"
+    )
+    # All 4 outputs returned.
+    assert set(out.keys()) == {"jobs", "recent", "nodes", "storage"}
+    for name in name_to_argv:
+        assert f"<output for {name}>" in out[name], (
+            f"slot {name!r} did not round-trip its output: {out[name]!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_bulk_run_acquires_semaphore_once_for_all_collectors():
+    """The per-host Semaphore(1) must be acquired EXACTLY ONCE per
+    bulk_run call, regardless of how many collectors are bundled.
+
+    Verifies the fix for the issue-#2 trap: under the legacy
+    asyncio.gather pattern, 4 collectors × Semaphore(1) = 4 sequential
+    acquisitions; under bulk_run it's 1 acquisition.
+    """
+    acquire_count = {"n": 0}
+
+    class FastProc:
+        returncode = 0
+        async def communicate(self):
+            return (b"---RBOUTBEGIN:abc:s1---\nx\n---RBOUTEND:abc:s1---\n", b"")
+        def kill(self): pass
+        async def wait(self): return 0
+
+    async def fake_create(*args, **kwargs):
+        last = args[-1] if args else ""
+        if "_rb_ssh_warm_" in last:
+            class Warm:
+                returncode = 0
+                async def communicate(self): return (b"_rb_ssh_warm_\n", b"")
+                def kill(self): pass
+                async def wait(self): return 0
+            return Warm()
+        return FastProc()
+
+    ex = SSHExecutor(host="sem-test-host")
+    # Pre-create the semaphore and wrap acquire to count.
+    ex._inflight = asyncio.Semaphore(1)
+    real_acq = ex._inflight.acquire
+
+    async def trace_acq():
+        acquire_count["n"] += 1
+        return await real_acq()
+
+    ex._inflight.acquire = trace_acq  # type: ignore[assignment]
+
+    with patch("rohanboard.exec.asyncio.create_subprocess_exec", new=fake_create):
+        await ex.bulk_run(
+            {"a": ["true"], "b": ["true"], "c": ["true"], "d": ["true"]},
+            timeout=5.0,
+        )
+
+    assert acquire_count["n"] == 1, (
+        f"bulk_run must acquire the semaphore exactly once; got "
+        f"{acquire_count['n']} acquisitions"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bulk_run_sentinels_unguessable_per_call():
+    """The sentinel TOKEN must be different across calls so a collector's
+    output that contains a literal "---RBOUTBEGIN:..." string can never
+    confuse a SUBSEQUENT call's demux.
+    """
+    captured_scripts = []
+
+    class FastProc:
+        returncode = 0
+        async def communicate(self):
+            return (b"", b"")
+        def kill(self): pass
+        async def wait(self): return 0
+
+    async def fake_create(*args, **kwargs):
+        last = args[-1] if args else ""
+        if "_rb_ssh_warm_" in last:
+            class Warm:
+                returncode = 0
+                async def communicate(self): return (b"_rb_ssh_warm_\n", b"")
+                def kill(self): pass
+                async def wait(self): return 0
+            return Warm()
+        captured_scripts.append(last)
+        return FastProc()
+
+    ex = SSHExecutor(host="token-test-host")
+
+    with patch("rohanboard.exec.asyncio.create_subprocess_exec", new=fake_create):
+        await ex.bulk_run({"a": ["true"]}, timeout=5.0)
+        await ex.bulk_run({"a": ["true"]}, timeout=5.0)
+
+    import re as _re
+    tokens = [_re.search(r"RBOUTBEGIN:([0-9a-f]+):", s).group(1) for s in captured_scripts]
+    assert len(tokens) == 2 and tokens[0] != tokens[1], (
+        f"per-call tokens must differ; got {tokens}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_executor_bulk_run_runs_all_commands():
+    """LocalExecutor.bulk_run must run every command and surface stdout."""
+    ex = LocalExecutor()
+    out = await ex.bulk_run({
+        "a": ["/bin/echo", "alpha"],
+        "b": ["/bin/echo", "bravo"],
+    })
+    assert out["a"].strip() == "alpha"
+    assert out["b"].strip() == "bravo"
+
+
+@pytest.mark.asyncio
+async def test_local_executor_bulk_run_failed_command_returns_empty():
+    """A non-zero rc command in bulk_run yields "" — does NOT raise.
+
+    Caller must distinguish "" (failed) from "" (legitimately empty
+    output) by knowing what its parser tolerates. Per #2's parse path
+    each downstream collector's parser tolerates empty input.
+    """
+    ex = LocalExecutor()
+    out = await ex.bulk_run({
+        "ok":   ["/bin/echo", "ok"],
+        "fail": ["/bin/false"],
+    })
+    assert out["ok"].strip() == "ok"
+    assert out["fail"] == ""

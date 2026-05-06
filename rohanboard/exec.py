@@ -17,6 +17,13 @@ an atexit + SIGTERM/SIGINT handler runs `ssh -O exit` on every known mux
 before the process dies. A per-host semaphore caps in-flight probes at 1
 so a slow/hanging probe blocks the next dispatch instead of stacking
 hundreds of stuck `ssh` children behind a dead socket.
+
+bulk_run (since 2026-05-06): coalesces N collector commands into ONE ssh
+round-trip. Per the saved memory `feedback_asyncio_subprocess_cancel_leaks.md`,
+`Semaphore(1) + asyncio.gather of N is fully serial` — every coroutine
+acquires the same sem before doing work, so 4 collectors × 1.4 s warm-call
+= 5.6 s, busts the 5 s tick budget, gets cancelled by `run_worker(exclusive
+=True)` mid-flight. Coalescing at the executor layer is the canonical fix.
 """
 from __future__ import annotations
 
@@ -24,6 +31,7 @@ import asyncio
 import atexit
 import logging
 import os
+import secrets
 import shlex
 import signal
 import subprocess
@@ -36,6 +44,25 @@ log = logging.getLogger(__name__)
 
 class Executor(Protocol):
     async def run(self, argv: list[str], timeout: float = 15.0) -> str: ...
+
+    async def bulk_run(
+        self,
+        name_to_argv: dict[str, list[str]],
+        timeout: float = 30.0,
+    ) -> dict[str, str]:
+        """Run multiple commands and return their outputs keyed by name.
+
+        Implementations may either:
+          - run all commands in a single transport round-trip (SSHExecutor:
+            sentinel-framed `bash -lc`), or
+          - run them via parallel `.run` calls (LocalExecutor: no semaphore,
+            so parallel local subprocesses are fine).
+
+        On per-command failure, the value for that key is "" (empty string).
+        Callers should detect an empty output that DOWNSTREAM parsers
+        cannot handle and treat it as a fetch error.
+        """
+        ...
 
     async def whoami(self) -> str:
         """Return the username on the executor's target.
@@ -87,6 +114,32 @@ class LocalExecutor:
     async def whoami(self) -> str:
         """Return the local username. For LocalExecutor this is just $USER."""
         return os.environ.get("USER", "")
+
+    async def bulk_run(
+        self,
+        name_to_argv: dict[str, list[str]],
+        timeout: float = 30.0,
+    ) -> dict[str, str]:
+        """Run all commands in PARALLEL via local subprocesses.
+
+        Local has no semaphore, so independent subprocesses run truly in
+        parallel — no benefit to combining them into a shell pipeline.
+        On per-command failure (non-zero rc / timeout), the corresponding
+        entry is "".
+        """
+        names = list(name_to_argv.keys())
+
+        async def _one(argv: list[str]) -> str:
+            try:
+                return await self.run(argv, timeout=timeout)
+            except Exception:
+                return ""
+
+        results = await asyncio.gather(
+            *[_one(name_to_argv[n]) for n in names],
+            return_exceptions=False,
+        )
+        return dict(zip(names, results))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -583,6 +636,101 @@ class SSHExecutor:
             return out.decode(errors="replace")
         finally:
             self._inflight.release()
+
+    async def bulk_run(
+        self,
+        name_to_argv: dict[str, list[str]],
+        timeout: float = 30.0,
+    ) -> dict[str, str]:
+        """Run multiple remote commands in ONE ssh round-trip.
+
+        Output is sentinel-framed:
+
+            ---RBOUTBEGIN:<TOKEN>:<name>---
+            <stdout of cmd>
+            ---RBOUTEND:<TOKEN>:<name>---
+
+        TOKEN is a per-call random hex string so a collector's stdout that
+        happens to contain the literal "---RBOUTBEGIN:..." text cannot
+        confuse the demux. We use `2>&1 || true` per command so a single
+        failing command does not abort the pipeline (its frame will just
+        contain the stderr text — caller's parser must tolerate that).
+
+        Crucial fix for issue #2 (LRZ Overview hang): the previous pattern
+        was N collector .run() calls fanned out via asyncio.gather; with
+        Semaphore(1) per host they serialise to N × per-call latency.
+        For LRZ N=4 collectors × 1.4 s warm-call = 5.6 s, busting the 5 s
+        tick budget. With bulk_run, ONE acquisition of the semaphore
+        covers all N commands.
+
+        On per-command failure (sentinel missing in output), the entry
+        for that key is "". An empty top-level `name_to_argv` returns {}.
+        """
+        if not name_to_argv:
+            return {}
+        token = secrets.token_hex(8)
+        names = list(name_to_argv.keys())
+        # Run each command IN PARALLEL on the remote, capturing its output
+        # to a per-name tmpfile. After `wait`, emit each output back-to-back
+        # framed by sentinels. This drops bulk wall-clock from
+        # sum(per-call) to max(per-call) — the actual fix for issue #2 on
+        # LRZ where dssusrinfo (~3 s) + scontrol (~2 s) + sacct (~2 s) +
+        # squeue (~1.4 s) sum to ~8 s, busting the 5 s tick.
+        bg_parts: list[str] = []
+        emit_parts: list[str] = []
+        # Use INDEX-based bash tmpvars (not name-derived) so a name with
+        # spaces / parens / non-identifier chars doesn't generate an
+        # invalid bash variable name. The user-visible `name` is still
+        # used in the sentinels (which are LITERAL strings, not bash
+        # vars) so the demux is unaffected.
+        for idx, name in enumerate(names):
+            argv = name_to_argv[name]
+            cmd = " ".join(shlex.quote(a) for a in argv)
+            tmpvar = f"_rb_tmp_{idx}"
+            beg = f"---RBOUTBEGIN:{token}:{name}---"
+            end = f"---RBOUTEND:{token}:{name}---"
+            # Each command runs in a subshell `( … ) &`; output captured
+            # to tmpfile so concurrent stdout doesn't interleave.
+            bg_parts.append(
+                f"{tmpvar}=$(mktemp); "
+                f"( {cmd} > \"${tmpvar}\" 2>&1 || true ) &"
+            )
+            emit_parts.append(
+                f"echo {shlex.quote(beg)}; "
+                f"cat \"${tmpvar}\" 2>/dev/null || true; "
+                f"echo {shlex.quote(end)}; "
+                f"rm -f \"${tmpvar}\""
+            )
+        # Sequence: spawn all commands in background, wait for all, then
+        # emit results in declared order. The `wait` joins all backgrounded
+        # processes (no specific PID list needed — all our subshells are
+        # the only background jobs of this script).
+        script = (
+            " ".join(bg_parts) + " "
+            "wait; "
+            + " ; ".join(emit_parts)
+        )
+        # Use `bash -c` directly; run wraps with bash -lc to invoke login
+        # shell (so `$MCMLSCRATCH` is set on LRZ via /etc/profile.d).
+        text = await self.run(["bash", "-c", script], timeout=timeout)
+        out: dict[str, str] = {}
+        for name in names:
+            beg = f"---RBOUTBEGIN:{token}:{name}---"
+            end = f"---RBOUTEND:{token}:{name}---"
+            if beg in text and end in text:
+                inner = text.split(beg, 1)[1].split(end, 1)[0]
+                # Strip the LEADING newline (echo writes one) but NOT
+                # trailing — collector parsers tolerate trailing newlines
+                # and we don't want to strip semantically-meaningful
+                # whitespace from inside.
+                if inner.startswith("\n"):
+                    inner = inner[1:]
+                if inner.endswith("\n"):
+                    inner = inner[:-1]
+                out[name] = inner
+            else:
+                out[name] = ""
+        return out
 
     async def whoami(self) -> str:
         """Return the REMOTE username on this ssh host (cached).

@@ -319,19 +319,38 @@ async def _resolve_self(executor: Executor, users: list[str]) -> list[str]:
     return [me if u == "self" else u for u in users if (me if u == "self" else u)]
 
 
-async def fetch_jobs(executor: Executor, users: list[str] | None = None) -> list[Job]:
-    """`users=['self']` → current user only; ['all'] or None → all users."""
+async def build_jobs_argv(
+    executor: Executor, users: list[str] | None = None
+) -> list[str]:
+    """Build the squeue argv for fetch_jobs without executing it.
+
+    Exposed so the orchestrator's bulk_run path can build jobs/recent_jobs/
+    nodes argv up-front and pass them all to executor.bulk_run in ONE
+    round-trip — coalescing the per-cluster collector fan-out behind the
+    SSHExecutor's per-host Semaphore(1) into a single acquisition.
+    """
     args = ["squeue", "-h", "-O", SQUEUE_O_FORMAT]
     if users and "all" not in users:
         resolved = await _resolve_self(executor, users)
         if resolved:
             args += ["-u", ",".join(resolved)]
+    return args
+
+
+async def fetch_jobs(executor: Executor, users: list[str] | None = None) -> list[Job]:
+    """`users=['self']` → current user only; ['all'] or None → all users."""
+    args = await build_jobs_argv(executor, users)
     text = await executor.run(args)
     return parse_squeue(text)
 
 
+def nodes_argv() -> list[str]:
+    """argv for fetch_nodes — exposed for bulk_run coalescing."""
+    return ["scontrol", "show", "node", "--all"]
+
+
 async def fetch_nodes(executor: Executor) -> list[Node]:
-    text = await executor.run(["scontrol", "show", "node", "--all"])
+    text = await executor.run(nodes_argv())
     return parse_scontrol_show_node(text)
 
 
@@ -465,12 +484,16 @@ async def fetch_job_env(executor: Executor, job_id: str) -> str:
     return await executor.run(["scontrol", "getenvironment", str(job_id)])
 
 
-async def fetch_recent_jobs(
+async def build_recent_jobs_argv(
     executor: Executor,
     users: list[str] | None = None,
     starttime: str = "now-3days",
-    limit: int = 50,
-) -> list[Job]:
+) -> list[str]:
+    """Build the sacct argv for fetch_recent_jobs without executing it.
+
+    Same purpose as `build_jobs_argv` — used by the orchestrator's bulk_run
+    path to coalesce the per-cluster collector fan-out.
+    """
     args = ["sacct", "-X", "-P", "-n", f"--starttime={starttime}", "-o", SACCT_FORMAT]
     if users and "all" not in users:
         resolved = await _resolve_self(executor, users)
@@ -480,7 +503,21 @@ async def fetch_recent_jobs(
         # sacct defaults to the invoking user when no -u is given; -a /
         # --allusers is required to actually see everyone's history.
         args += ["-a"]
-    text = await executor.run(args, timeout=20.0)
+    return args
+
+
+def parse_recent_jobs(text: str, limit: int = 50) -> list[Job]:
+    """Parse sacct output (most-recent first, capped at `limit`)."""
     jobs = parse_sacct(text)
-    # Most-recent first; sacct returns ascending JobID, reverse.
     return list(reversed(jobs))[:limit]
+
+
+async def fetch_recent_jobs(
+    executor: Executor,
+    users: list[str] | None = None,
+    starttime: str = "now-3days",
+    limit: int = 50,
+) -> list[Job]:
+    args = await build_recent_jobs_argv(executor, users, starttime)
+    text = await executor.run(args, timeout=20.0)
+    return parse_recent_jobs(text, limit=limit)

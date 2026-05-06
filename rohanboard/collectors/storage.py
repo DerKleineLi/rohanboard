@@ -453,55 +453,33 @@ def parse_dssusrinfo(text: str) -> DssInfo:
     return info
 
 
-async def discover_lrz_storage(executor: Executor) -> list[StorageEntry]:
-    """Auto-discover LRZ storage: home + scratch + DSS containers.
+# Sentinels for the LRZ discover script — exposed at module scope so the
+# orchestrator's bulk_run path can splice the script into a multi-command
+# round-trip and demux without re-defining them.
+_LRZ_SEP_DSS = "---DSSUSRINFO_BEGIN---"
+_LRZ_SEP_DSS_END = "---DSSUSRINFO_END---"
+_LRZ_SEP_DF = "---DFBLOCK_BEGIN---"
 
-    ONE SSH round-trip — coalesced from the previous two-call shape. The
-    sequence is:
 
-      1. (single ssh) emit env vars (HOME, MCMLSCRATCH) + dssusrinfo body
-         + (after parse on the wire) df -B1 of all known fixed paths in
-         the SAME shell command, separated by sentinels.
+def lrz_discover_script() -> str:
+    """Return the shell script for one-round-trip LRZ storage discovery.
 
-    Per the saved memory `feedback_asyncio_subprocess_cancel_leaks.md`:
-    `Semaphore(1)` is correct for wedge protection but is PESSIMAL for
-    fan-out — coalesce at the COLLECTOR layer instead of widening the
-    cap. Two round-trips × Semaphore(1) is fully serial; one round-trip
-    halves the LRZ tick.
-
-    Quotas (where reported by dssusrinfo) override the df-derived `total`
-    so the bar reflects user-visible quota rather than physical disk.
-
-    Returns an ordered list: home, scratch, then each container alphabetically.
+    Exposed so `app._refresh_cluster_bulk` can include it as one entry in
+    a multi-command `executor.bulk_run` call. The script is shell-only
+    (no Python interpolation needed beyond the sentinels) — pure idempotent
+    text.
     """
-    # Two sentinels framing the dssusrinfo body and the df output so the
-    # client can split cleanly even if dssusrinfo's banners contain '---'.
-    SEP_DSS = "---DSSUSRINFO_BEGIN---"
-    SEP_DSS_END = "---DSSUSRINFO_END---"
-    SEP_DF = "---DFBLOCK_BEGIN---"
-
-    # The shell script runs everything in one ssh round-trip:
-    #   1. echo HOME + MCMLSCRATCH
-    #   2. dssusrinfo all
-    #   3. df -B1 $HOME $MCMLSCRATCH (always — known paths)
-    #
-    # DSS-container df has to wait until we KNOW their paths (parsed from
-    # dssusrinfo body). But — crucial trick — we do it in the SAME
-    # shell pipeline by parsing dssusrinfo with awk/sed inline. To keep
-    # the parser-on-the-wire simple, we capture dssusrinfo to a tmpfile,
-    # extract container paths via awk, and df them all in the same call.
-    # Net: one ssh round-trip, ~3 s warm tick (was 2 × 3 s = ~6 s).
-    script = f"""
+    return f"""
 set -u
 echo HOME=$HOME
 echo MCML=${{MCMLSCRATCH-}}
-echo {SEP_DSS}
+echo {_LRZ_SEP_DSS}
 TMPF=$(mktemp)
 trap 'rm -f "$TMPF"' EXIT
 dssusrinfo all > "$TMPF" 2>&1 || true
 cat "$TMPF"
-echo {SEP_DSS_END}
-echo {SEP_DF}
+echo {_LRZ_SEP_DSS_END}
+echo {_LRZ_SEP_DF}
 # Build df argv: $HOME, $MCMLSCRATCH (if set), and any "at <path>" tokens
 # from the DSS containers section of dssusrinfo.
 PATHS=""
@@ -515,8 +493,19 @@ if [ -n "$PATHS" ]; then
   df -B1 $PATHS 2>/dev/null || true
 fi
 """
-    cmd = ["bash", "-lc", script]
-    text = await executor.run(cmd, timeout=60.0)
+
+
+def parse_lrz_discover(text: str) -> list[StorageEntry]:
+    """Parse the output of `lrz_discover_script()` into StorageEntry list.
+
+    Split out from `discover_lrz_storage` so the orchestrator can call
+    `executor.bulk_run` (which combines this with other collectors into
+    ONE ssh round-trip) and feed the resulting text back through the
+    same parser.
+    """
+    SEP_DSS = _LRZ_SEP_DSS
+    SEP_DSS_END = _LRZ_SEP_DSS_END
+    SEP_DF = _LRZ_SEP_DF
 
     # Parse: prefix env, dssusrinfo body, df body — sliced by sentinels.
     home_path: Path | None = None
@@ -646,3 +635,33 @@ fi
             out.append(df_e)
 
     return out
+
+
+async def discover_lrz_storage(executor: Executor) -> list[StorageEntry]:
+    """Auto-discover LRZ storage: home + scratch + DSS containers.
+
+    ONE SSH round-trip — coalesced from the previous two-call shape. The
+    sequence is:
+
+      1. (single ssh) emit env vars (HOME, MCMLSCRATCH) + dssusrinfo body
+         + (after parse on the wire) df -B1 of all known fixed paths in
+         the SAME shell command, separated by sentinels.
+
+    Per the saved memory `feedback_asyncio_subprocess_cancel_leaks.md`:
+    `Semaphore(1)` is correct for wedge protection but is PESSIMAL for
+    fan-out — coalesce at the COLLECTOR layer instead of widening the
+    cap. Two round-trips × Semaphore(1) is fully serial; one round-trip
+    halves the LRZ tick.
+
+    Quotas (where reported by dssusrinfo) override the df-derived `total`
+    so the bar reflects user-visible quota rather than physical disk.
+
+    Returns an ordered list: home, scratch, then each container alphabetically.
+
+    Implementation: thin wrapper around `lrz_discover_script()` +
+    `parse_lrz_discover()` so the orchestrator's bulk_run path can reuse
+    the script and parser without re-issuing the ssh round-trip.
+    """
+    cmd = ["bash", "-lc", lrz_discover_script()]
+    text = await executor.run(cmd, timeout=60.0)
+    return parse_lrz_discover(text)
