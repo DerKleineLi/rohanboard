@@ -329,6 +329,13 @@ class JobsTable(Widget):
         self._sort_reverse = True   # newest jobs (highest JOBID) at the top
         self._applied_sort = None
         self._presets = presets or []
+        # Issue #1 (filter input drop): debounce filter rebuilds at
+        # ~150 ms so a fast typist's keystrokes coalesce into ONE
+        # DataTable rebuild after they pause. Without debounce, every
+        # keystroke triggered a synchronous rebuild that — under
+        # refresh-tick pressure — starved Textual's input dispatch and
+        # dropped ~50% of slow keystrokes.
+        self._filter_debounce_timer = None
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -497,13 +504,48 @@ class JobsTable(Widget):
     # ── filter ──────────────────────────────────────────────
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "filter":
-            self.filter_text = event.value
+        if event.input.id != "filter":
+            return
+        # Set the reactive — keeps any external observer (e.g. a future
+        # "save filter" feature) in sync with what the user typed —
+        # but DON'T let watch_filter_text drive a synchronous full
+        # DataTable rebuild. Instead, debounce at ~150 ms so a fast
+        # typist's keystrokes coalesce into one rebuild after they pause.
+        self.filter_text = event.value
+        # Cancel any pending rebuild and schedule a fresh one. Per
+        # saved memory `feedback_tmux_burstkey_input_test.md` (Filter-
+        # bar character-drop variant): under refresh-tick pressure,
+        # synchronous per-keystroke rebuilds starve Textual's input
+        # dispatch loop, dropping ~50% of slow keystrokes. 150 ms
+        # debounce is short enough to feel responsive (table updates
+        # within 150 ms of user pause), long enough to coalesce typing.
+        if self._filter_debounce_timer is not None:
+            try:
+                self._filter_debounce_timer.stop()
+            except Exception:
+                pass
+        try:
+            self._filter_debounce_timer = self.set_timer(
+                0.15, self._apply_filter_debounced
+            )
+        except Exception:
+            # Fallback: no event loop running (test path) — just apply
+            # synchronously.
+            self._apply_filter_debounced()
 
-    def watch_filter_text(self, _old: str, _new: str) -> None:
+    def _apply_filter_debounced(self) -> None:
+        """Run the actual filter+rebuild after the debounce timer fires."""
+        self._filter_debounce_timer = None
         if self.is_mounted and self._last_snapshot is not None:
             self._applied_sort = None
             self.update_snapshot(self._last_snapshot)
+
+    def watch_filter_text(self, _old: str, _new: str) -> None:
+        # No-op: debounce handles the rebuild. The reactive write from
+        # on_input_changed still fires this watcher, but we don't drive
+        # the synchronous rebuild here any more — that path was the
+        # root cause of issue #1 (filter-bar input drop).
+        return
 
     def watch_mine_only(self, _old: bool, new: bool) -> None:
         if not self.is_mounted:

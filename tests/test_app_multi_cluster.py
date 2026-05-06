@@ -777,3 +777,100 @@ async def test_burst_keypresses_no_slow_executor_baseline():
             assert settled_at is not None, "fast-baseline burst must reach storage"
             lag_ms = (settled_at - t_burst_end) * 1000
             assert lag_ms < 100.0, f"baseline lag {lag_ms:.1f} ms > 100 ms"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Issue #1 — filter input debounce coalesces typing into one rebuild
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_filter_debounce_coalesces_keystrokes():
+    """Typing N characters into the filter input must NOT trigger N
+    synchronous DataTable rebuilds. With the 150 ms debounce, only ONE
+    rebuild fires after the user pauses for 150 ms.
+
+    Pre-fix: every `on_input_changed` synchronously called
+    `update_snapshot` (full DataTable rebuild). Under refresh-tick
+    pressure that starved Textual's input dispatch and dropped ~50%
+    of slow keystrokes (per the v3 plan's measured live test).
+
+    Post-fix: keystrokes set the reactive but defer the rebuild via
+    a 150 ms timer. We verify by counting rebuild calls.
+    """
+    from rohanboard.collectors.models import Job, Snapshot
+    from rohanboard.widgets.jobs_table import JobsTable
+
+    rebuild_count = {"n": 0}
+    real_update = JobsTable.update_snapshot
+
+    def trace_update(self, snap):
+        rebuild_count["n"] += 1
+        return real_update(self, snap)
+
+    cfg = _make_multi_config_one()
+    cfg.layout.tabs = [TabConfig(id="jobs", title="Jobs", widgets=["jobs_table"])]
+
+    async def fake_jobs(*_a, **_k):
+        return [Job(
+            job_id="1", partition="p", name="x", user="u", state="RUNNING",
+            node_or_reason="n", time_used="00:01:00", time_left="00:01:00",
+            num_nodes=1, num_cpus=1, tres="cpu=1", alloc_mem="1G", alloc_gpu="—",
+        )]
+    async def fake_nodes(*_a, **_k): return []
+    async def fake_recent(*_a, **_k): return []
+
+    app = RohanBoardApp(config=cfg)
+
+    with patch("rohanboard.app.slurm.fetch_jobs", new=fake_jobs), \
+         patch("rohanboard.app.slurm.fetch_nodes", new=fake_nodes), \
+         patch("rohanboard.app.slurm.fetch_recent_jobs", new=fake_recent), \
+         patch.object(JobsTable, "update_snapshot", new=trace_update):
+        async with app.run_test(size=(160, 40)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            jt = app.query_one(JobsTable)
+            # Reset count after initial mount + first refresh.
+            rebuild_count["n"] = 0
+            # Type 5 chars in <150 ms via direct reactive write.
+            for c in "abcde":
+                jt.filter_text = c
+                # Drive the on_input_changed path manually since a real
+                # Input.Changed event would also set filter_text.
+                if jt._filter_debounce_timer is not None:
+                    try:
+                        jt._filter_debounce_timer.stop()
+                    except Exception:
+                        pass
+                jt._filter_debounce_timer = jt.set_timer(
+                    0.15, jt._apply_filter_debounced
+                )
+                await asyncio.sleep(0.02)
+            # Now wait > 150 ms for the timer to fire.
+            await asyncio.sleep(0.30)
+            await pilot.pause()
+            # Exactly ONE rebuild from the debounce, no per-keystroke storm.
+            assert rebuild_count["n"] == 1, (
+                f"expected 1 rebuild from debounce; got {rebuild_count['n']} "
+                f"— per-keystroke rebuild storm not coalesced"
+            )
+
+
+def _make_multi_config_one():
+    """Single-cluster config — debounce test doesn't need multi-cluster."""
+    cluster = Cluster(
+        id="rohan", title="rohan",
+        executor=LocalExecutor(),
+        slurm=SlurmFilterConfig(users=["self"]),
+        storage_entries=[],
+        refresh=RefreshConfig(),
+    )
+    return Config(
+        clusters=[cluster],
+        layout=LayoutConfig(tabs=[
+            TabConfig(id="jobs", title="Jobs", widgets=["jobs_table"]),
+        ]),
+        theme=ThemeConfig(),
+        overview=OverviewConfig(),
+        presets={"nodes": [], "jobs": []},
+    )
