@@ -1,6 +1,7 @@
 """Jobs DataTable with active/recent toggle, sort, and filter."""
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 
@@ -313,6 +314,12 @@ class JobsTable(Widget):
         self._sort_reverse = True   # newest jobs (highest JOBID) at the top
         self._applied_sort = None
         self._presets = presets or []
+        # Phase 3.5 (filter input drop): ~150 ms debounce so a fast
+        # typist's keystrokes coalesce into ONE DataTable rebuild after
+        # they pause. Without debounce, every keystroke triggered a
+        # synchronous rebuild that — under refresh-tick pressure —
+        # starved Textual's input dispatch and dropped keystrokes.
+        self._filter_debounce_timer = None
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -489,13 +496,134 @@ class JobsTable(Widget):
     # ── filter ──────────────────────────────────────────────
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "filter":
-            self.filter_text = event.value
+        if event.input.id != "filter":
+            return
+        # Set the reactive (keeps any external observer in sync) but
+        # DON'T let watch_filter_text drive a synchronous full rebuild.
+        # Debounce at ~150 ms so a fast typist's keystrokes coalesce
+        # into ONE DataTable rebuild.
+        self.filter_text = event.value
+        if self._filter_debounce_timer is not None:
+            try:
+                self._filter_debounce_timer.stop()
+            except Exception:
+                pass
+        try:
+            self._filter_debounce_timer = self.set_timer(
+                0.15, self._apply_filter_debounced
+            )
+        except Exception:
+            # Fallback (no event loop in test path): apply synchronously.
+            self._apply_filter_debounced()
+
+    def _apply_filter_debounced(self) -> None:
+        """Run the actual filter+rebuild after the debounce timer fires.
+
+        Phase 3.5 (chunked rebuild): dispatch via `run_worker` so the
+        rebuild runs on the event loop as a coroutine that yields every
+        50 row mutations. The synchronous body would otherwise block
+        input dispatch for 50–200 ms when the table has 100+ rows,
+        dropping keystrokes from a fast typist who's STILL typing while
+        the debounce-fired rebuild lands.
+        """
+        self._filter_debounce_timer = None
+        if not (self.is_mounted and self._last_snapshot is not None):
+            return
+        self._applied_sort = None
+        try:
+            self.run_worker(
+                self._apply_filter_async(self._last_snapshot),
+                exclusive=True,
+                group=f"apply_filter_jobs_{self.id or id(self)}",
+            )
+        except Exception:
+            # Fallback (no event loop / test path): run synchronously.
+            self.update_snapshot(self._last_snapshot)
+
+    async def _apply_filter_async(self, snapshot: Snapshot) -> None:
+        """Async chunked filter+rebuild — `await asyncio.sleep(0)` every
+        50 row mutations to yield control back to Textual's input
+        dispatch loop. Mirrors the synchronous `update_snapshot` body
+        but pauses periodically so a fast typist's next keystroke can
+        be processed before the rebuild finishes.
+        """
+        self._last_snapshot = snapshot
+        table = self.query_one("#jobs_table_dt", DataTable)
+        prev_scroll_x = table.scroll_x
+        prev_scroll_y = table.scroll_y
+        prev_cursor = table.cursor_coordinate
+
+        jobs: list[Job] = snapshot.jobs if self.mode == "active" else getattr(snapshot, "recent_jobs", [])
+        err_key = "jobs" if self.mode == "active" else "recent_jobs"
+
+        if (err := snapshot.errors.get(err_key)) or not jobs:
+            self._row_keys.clear()
+            table.clear()
+            n_cols = len(self._current_columns)
+            if err:
+                table.add_row(Text(f"⚠ {err}", style="bold red"), *([""] * (n_cols - 1)))
+            else:
+                kind = "active" if self.mode == "active" else "recent"
+                table.add_row(Text(f"— no {kind} jobs —", style="dim italic"), *([""] * (n_cols - 1)))
+            return
+
+        matcher = make_matcher(self.filter_text, list(_JOB_FILTER_DEFAULT_FIELDS))
+        jobs = [j for j in jobs if matcher(_job_filter_record(j))]
+        jobs.sort(key=lambda j: _sort_value(j, self._sort_col), reverse=self._sort_reverse)
+
+        current_sort = (self._sort_col, self._sort_reverse)
+        if self._applied_sort != current_sort or (not self._row_keys and table.row_count > 0):
+            table.clear()
+            self._row_keys.clear()
+            self._applied_sort = current_sort
+
+        new_keys: set[str] = set()
+        mut_count = 0
+        for j in jobs:
+            row = self._row_for_job(j, self.mode)
+            new_keys.add(j.job_id)
+            if j.job_id in self._row_keys:
+                rk = self._row_keys[j.job_id]
+                for col_key, val in row.items():
+                    try:
+                        table.update_cell(rk, col_key, val, update_width=False)
+                    except Exception:
+                        pass
+            else:
+                values = [row[k] for k, _l, _w, _s in self._current_columns]
+                rk = table.add_row(*values, key=j.job_id)
+                self._row_keys[j.job_id] = rk
+            mut_count += 1
+            if mut_count % 50 == 0:
+                await asyncio.sleep(0)
+
+        for stale_key in list(self._row_keys.keys() - new_keys):
+            try:
+                table.remove_row(self._row_keys[stale_key])
+            except Exception:
+                pass
+            del self._row_keys[stale_key]
+            mut_count += 1
+            if mut_count % 50 == 0:
+                await asyncio.sleep(0)
+
+        if not jobs:
+            n_cols = len(self._current_columns)
+            table.add_row(Text(f"— no jobs match '{self.filter_text}' —", style="dim italic"),
+                          *([""] * (n_cols - 1)))
+
+        try:
+            table.cursor_coordinate = prev_cursor
+            table.scroll_to(x=prev_scroll_x, y=prev_scroll_y, animate=False)
+        except Exception:
+            pass
 
     def watch_filter_text(self, _old: str, _new: str) -> None:
-        if self.is_mounted and self._last_snapshot is not None:
-            self._applied_sort = None
-            self.update_snapshot(self._last_snapshot)
+        # No-op: debounce in on_input_changed handles the rebuild. The
+        # reactive write still fires this watcher, but driving the
+        # synchronous rebuild here was the root cause of filter-bar
+        # input drops.
+        return
 
     def watch_mine_only(self, _old: bool, new: bool) -> None:
         if not self.is_mounted:
