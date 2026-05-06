@@ -195,30 +195,29 @@ def _make_hang_proc():
 
 
 @pytest.mark.asyncio
-async def test_ssh_executor_run_marks_mux_dead_on_per_call_timeout():
-    """When `.run`'s per-call wait_for fires, the executor must mark the
-    mux dead (`_master_ready=False`) so the NEXT call re-warms from
-    scratch. Without this, the next call's `_warm_master` would short-
-    circuit on `ssh -O check` against the same dead socket.
+async def test_ssh_executor_run_per_call_timeout_does_NOT_mark_mux_dead():
+    """When `.run`'s per-call wait_for fires, the executor must NOT mark
+    the mux dead — a slow-but-reachable cluster (LRZ scontrol slow on
+    busy controller) can legitimately exceed the 15 s default timeout
+    without the underlying mux being broken. Marking dead in this path
+    would force a 10+ s re-warm on every subsequent tick, perpetually
+    losing time before the next legitimate call.
 
-    The mux-cleanup runs in `finally`, so `_master_ready` should be False
-    by the time the awaiting coroutine sees the TimeoutError surface.
+    The warm-master path's pre-flight `ssh -O check` is what catches a
+    truly-dead mux; the per-call timeout just propagates upward as a
+    TimeoutError without touching mux state. The semaphore is released
+    (always, in `finally`) so the next call can immediately try.
     """
     ex = SSHExecutor(host="timeout-detect-host")
     ex._master_ready = True   # pretend warm path already completed
-    # Skip the warm-master ssh -O check round-trip; tests don't have a
-    # real mux on disk.
     ex._mux_check_blocking = lambda *_a, **_k: True  # type: ignore
 
-    # Patch BOTH the subprocess (so .run's actual ssh call hangs) AND
-    # `_mark_mux_dead` to confirm it gets called. We don't actually want
-    # the mark to ssh-O-exit anything — we just want to trace it.
     mark_calls = {"n": 0}
+    real_mark = ex._mark_mux_dead
 
     def trace_mark():
         mark_calls["n"] += 1
-        # Don't actually run ssh -O exit — just flip the flag.
-        ex._master_ready = False
+        real_mark()
 
     ex._mark_mux_dead = trace_mark
 
@@ -228,26 +227,28 @@ async def test_ssh_executor_run_marks_mux_dead_on_per_call_timeout():
     with patch("rohanboard.exec.asyncio.create_subprocess_exec", new=fake_create):
         with pytest.raises(asyncio.TimeoutError):
             await ex.run(["squeue"], timeout=0.05)
-    assert mark_calls["n"] >= 1, (
-        "post-timeout cleanup must call _mark_mux_dead so the next call "
-        "doesn't short-circuit to a known-broken mux"
+
+    assert mark_calls["n"] == 0, (
+        "per-call TimeoutError must NOT call _mark_mux_dead — that would "
+        "tear down a working mux on every slow-call tick"
     )
-    assert ex._master_ready is False, (
-        "_master_ready must be False after a per-call timeout"
-    )
+    # _master_ready is unchanged.
+    assert ex._master_ready is True
+    # Semaphore released so next call can proceed immediately.
+    assert ex._inflight is not None
+    assert ex._inflight._value == 1
 
 
 @pytest.mark.asyncio
 async def test_ssh_executor_recovers_after_timeout_on_next_call():
     """End-to-end: first call hangs → TimeoutError; SECOND call succeeds.
-    Confirms the semaphore is released, the mux is re-warmed, and no
-    state leaks between calls. This is the durable fix for the LRZ
-    'another probe is already in flight' wedge from issue #3.
+    Confirms the semaphore is released and no state leaks between calls.
+    The per-call TimeoutError does NOT mark the mux dead (see
+    `test_ssh_executor_run_per_call_timeout_does_NOT_mark_mux_dead`),
+    so the second call goes straight through with the warm mux.
     """
     ex = SSHExecutor(host="recover-host")
     ex._master_ready = True   # First call assumes warm
-    # Test: skip the in-process ssh -O check round-trip; we're not
-    # exercising the on-disk mux file.
     ex._mux_check_blocking = lambda *_a, **_k: True  # type: ignore
 
     # First subprocess hangs; second is fine.
@@ -255,36 +256,19 @@ async def test_ssh_executor_recovers_after_timeout_on_next_call():
 
     async def fake_create(*args, **kwargs):
         proc_idx["i"] += 1
-        # First call (the actual command) hangs → triggers per-call
-        # timeout, which marks mux dead.
         if proc_idx["i"] == 1:
             return _make_hang_proc()
-        # All subsequent spawns (warm + second actual command) succeed.
         return _make_ok_proc()
 
-    # Stub the mark-mux-dead's subprocess.run so it doesn't actually try
-    # to `ssh -O exit` against a real host (which would silently fail
-    # but waste 2 s of the 30 s test budget).
-    with patch("rohanboard.exec.asyncio.create_subprocess_exec", new=fake_create), \
-         patch("rohanboard.exec.subprocess.run") as ssh_exit_run:
-        ssh_exit_run.return_value = subprocess_completed_process()
+    with patch("rohanboard.exec.asyncio.create_subprocess_exec", new=fake_create):
         # First call: should TimeoutError after the per-call timeout.
         with pytest.raises(asyncio.TimeoutError):
             await ex.run(["squeue"], timeout=0.05)
-        assert ex._master_ready is False, "mux should be marked dead"
-        # Second call: master must be re-warmed, then the real call runs.
-        # Both subprocess spawns are _make_ok_proc instances per fake_create.
+        # mux is NOT marked dead on per-call timeout (slow != broken).
+        assert ex._master_ready is True
+        # Second call: mux is still warm, command goes straight through.
         out = await ex.run(["squeue"], timeout=2.0)
         assert out.strip() == "ok"
-        # Sanity: warmed back up.
-        assert ex._master_ready is True
-
-
-def subprocess_completed_process(rc: int = 0):
-    """Helper to fabricate a subprocess.CompletedProcess for the patch."""
-    class Done:
-        returncode = rc
-    return Done()
 
 
 @pytest.mark.asyncio
