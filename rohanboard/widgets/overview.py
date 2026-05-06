@@ -7,13 +7,12 @@ Two modes, chosen by width:
   wide:                       left col = Totals + Home,
                               right col = Jobs (max height = window; scrolls).
                               If the height slack can fit a Utilization panel,
-                              it is added to the left col; otherwise the Home
-                              card stretches to match the right col.
+                              it is added to whichever column is shorter.
                               ASCII appears below if there is still slack.
 
-No imperative balancer, no grow_to, no finalize pass — the single `.flex`
-card per column uses `height: 1fr` inside a grid row of `1fr`, so Textual's
-layout engine does the balancing for free.
+In wide+fit mode #main uses `layout: horizontal` (NOT grid) so each
+column sizes to its OWN content — the shorter one doesn't pad to match
+the taller one. Slack is absorbed by `#ascii_row` BELOW #main at 1fr.
 """
 from __future__ import annotations
 
@@ -267,29 +266,39 @@ class OverviewPanel(Widget):
     OverviewPanel.scroll .card { margin-bottom: 0; }
     OverviewPanel #ascii_row.hidden { display: none; }
 
-    /* ── WIDE + fit: 2-col grid, content-sized cols, ASCII absorbs slack ──
-       The 2026-05-05 layout fix.  Was: `grid-rows: 1fr` + imperative
-       height = max(left_nat, right_nat).  Problem: Util card's flex=true
-       inside the right column pushed the SHARED row height past the
-       imperative target, leaving the LEFT column shorter than its
-       allocation → 1–3 row gap below HomeStorage and above the ASCII pane.
+    /* ── WIDE + fit: 2 INDEPENDENT-HEIGHT columns side by side ────────
+       The 2026-05-06 layout fix.  Was: `layout: grid` with `grid-size: 2`.
+       Problem: a 2-cell grid row's height is `max(left_nat, right_nat)`,
+       and the SHORTER column's children pack at the TOP — the bottom of
+       the shorter column gets bare `│ … │` border padding (the user-
+       reported "2-line gap below HomeStorage / Util card"). There is no
+       grid knob for "let each column be its own height".
 
-       Fix: drop `grid-rows: 1fr` and the imperative height — let each
-       column size to its natural content (no shared row).  The ASCII
-       pane below #main is still `1fr`, so it absorbs whatever vertical
-       slack remains regardless of which column is taller.  No more gap
-       inside #main; the slack is always at the bottom (where ASCII
-       lives), which is where it should be. */
+       Fix: replace grid with `layout: horizontal`. Two `width: 1fr`
+       Verticals let each column size to ITS OWN content — the shorter
+       column ends precisely where its content ends, no padding inside
+       the row.  The Horizontal itself is `height: auto`, so #main sizes
+       to the TALLER column.  The `#ascii_row` BELOW (still `1fr`)
+       absorbs whatever vertical slack remains. Result: no gap on
+       either side; the visual bottom of both columns can differ but
+       neither is padded with bare border, and the ASCII pane spans
+       full width below. */
     OverviewPanel.wide.fit #main {
-        layout: grid;
-        grid-size: 2;
-        grid-gutter: 0 1;
+        layout: horizontal;
         height: auto;
         min-height: 0;
     }
     OverviewPanel.wide.fit #main > .col {
         layout: vertical;
+        width: 1fr;
         height: auto;
+    }
+    /* Spacer between the two columns. Applied to the FIRST column so
+       only the gap between them is created (no trailing margin past
+       the right column). `:first-of-type` is the Textual selector for
+       the first child of the parent that matches the `.col` class. */
+    OverviewPanel.wide.fit #main > .col:first-of-type {
+        margin-right: 1;
     }
     /* Inside fit mode, no card stretches — they all sit at natural
        height and the ASCII pane below absorbs the slack. The widget-
@@ -496,9 +505,12 @@ class OverviewPanel(Widget):
             main.mount(_card(HomeStorage()))
             main.mount(_card(CompactJobs()))
         else:
-            main.styles.grid_size_columns = 2
-            col_left = Vertical(classes="col")
-            col_right = Vertical(classes="col")
+            # Wide+fit: two independent-height columns side-by-side via
+            # `layout: horizontal` (set in CSS). The CSS `> .col` rule
+            # styles each at `width: 1fr; height: auto`; the
+            # `:first-of-type` rule adds the inter-column spacer.
+            col_left = Vertical(classes="col left-col")
+            col_right = Vertical(classes="col right-col")
             main.mount(col_left)
             main.mount(col_right)
 
