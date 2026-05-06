@@ -51,6 +51,11 @@ class RohanBoardApp(App):
         # Step-3 multi-cluster cycle.  No-ops in single-cluster mode (see
         # check_action below — hidden when there's only one cluster).
         ("c", "cycle_cluster", "Cycle cluster"),
+        # Focus the filter input on the currently-active inner tab (Jobs or
+        # Nodes).  Hidden on tabs that don't have a filter (see
+        # check_action).  Useful for live tmux input-test reachability and
+        # day-to-day "jump to filter" muscle memory.
+        ("f", "focus_filter", "Filter"),
     ]
 
     # `snapshot` is the *active cluster's* snapshot.  Kept for back-compat
@@ -86,6 +91,13 @@ class RohanBoardApp(App):
         # rather than cancel the in-flight one (which would mean no LRZ
         # tick ever completes, leaving the Overview stuck on "loading…").
         self._tick_inflight: dict[str, bool] = {c.id: False for c in self.cfg.clusters}
+        # Lead 1 (click-ignore fix): cache the per-cluster fan-out target
+        # list — every widget under the cluster's outer TabPane that has
+        # an `update_snapshot` handler. Built lazily on first broadcast
+        # (the widget tree is stable post-mount), avoiding a tree-wide
+        # `self.query("*")` + per-widget `_is_under_pane` parent walk on
+        # EVERY cluster tick. Invalidated on `compose` (covers respawn).
+        self._fanout_cache: dict[str, list[Widget]] = {}
         # `mine_only` drives whether `-u $USER` is passed to squeue/sacct.
         # The "Mine only" pill in the Jobs tab flips this and triggers a
         # fresh fetch — no need for client-side filtering.  Per-cluster so
@@ -150,6 +162,8 @@ class RohanBoardApp(App):
         return factory()
 
     def compose(self) -> ComposeResult:
+        # Reset the fanout cache (Lead 1) — recompose rebuilds the tree.
+        self._fanout_cache = {}
         yield Header(show_clock=True)
         if not self.cfg.layout.tabs:
             yield Static("No tabs configured.")
@@ -316,6 +330,10 @@ class RohanBoardApp(App):
             inner = self._active_inner_tab()
             if inner != "jobs":
                 return False
+        if action == "focus_filter":
+            inner = self._active_inner_tab()
+            if inner not in ("jobs", "nodes"):
+                return False
         return True
 
     def _active_inner_tab(self) -> str | None:
@@ -384,6 +402,32 @@ class RohanBoardApp(App):
     def action_jobs_tail_log(self) -> None:
         if jt := self._visible_jobs_table():
             jt.action_tail_log()
+
+    def action_focus_filter(self) -> None:
+        """Focus the filter input on the currently-active Jobs/Nodes pane.
+
+        Used as a live-test affordance (tmux send-keys can't directly click
+        a widget) and a day-to-day shortcut.  No-op off Jobs/Nodes tabs —
+        check_action hides the binding entirely there.
+        """
+        inner = self._active_inner_tab()
+        if inner not in ("jobs", "nodes"):
+            return
+        target_pane_id = (
+            f"{self.active_cluster_id}__{inner}"
+            if len(self.cfg.clusters) > 1 else inner
+        )
+        # Walk up from each #filter Input to find the one in the active pane.
+        from textual.widgets import Input as _Input
+        for inp in self.query("#filter"):
+            if not isinstance(inp, _Input):
+                continue
+            pane = inp.parent
+            while pane is not None and not isinstance(pane, TabPane):
+                pane = pane.parent
+            if isinstance(pane, TabPane) and pane.id == target_pane_id:
+                inp.focus()
+                return
 
     # ────────────────────────────────────────────────────────────────────
     # data
@@ -824,6 +868,49 @@ class RohanBoardApp(App):
         # already happened in _refresh_cluster.
         return
 
+    def _fanout_targets(self, cluster_id: str) -> list[Widget]:
+        """Resolve (and cache) the widgets to fan a snapshot out to for
+        `cluster_id`.
+
+        Lead 1 (click-ignore fix): the previous implementation did
+        `self.query("*")` on every broadcast, then filtered each widget
+        via `_is_under_pane` — a parent-chain walk per widget. With N
+        clusters that's N × full-tree walk per refresh tick on the event
+        loop, blocking input dispatch.
+
+        Now cached lazily per cluster. The widget tree is stable
+        post-mount (per cluster's TabPane content is composed once), so
+        caching the list is safe. Cache is reset in `compose()` so a
+        respawn / re-compose rebuilds it on next tick.
+        """
+        cached = self._fanout_cache.get(cluster_id)
+        if cached is not None:
+            return cached
+        multi = len(self.cfg.clusters) > 1
+        if multi:
+            try:
+                pane = self.query_one(f"#cluster_{cluster_id}", TabPane)
+            except Exception:
+                # Tree not fully composed yet — skip caching, do a one-
+                # off tree walk so this tick still fans out.
+                return [
+                    w for w in self.query("*")
+                    if callable(getattr(w, "update_snapshot", None))
+                    and _is_under_pane(w, f"cluster_{cluster_id}")
+                ]
+            scope = pane.query("*")
+        else:
+            scope = self.query("*")
+        widgets = [
+            w for w in scope
+            if callable(getattr(w, "update_snapshot", None))
+        ]
+        # Only cache if we got at least one target — otherwise the tree
+        # is mid-mount and the empty list would lock in.
+        if widgets:
+            self._fanout_cache[cluster_id] = widgets
+        return widgets
+
     async def _broadcast_to_cluster(self, cluster_id: str, snap: Snapshot) -> None:
         """Push `snap` into every widget that lives inside the outer
         TabPane for `cluster_id` (multi-cluster mode) or every widget
@@ -833,15 +920,14 @@ class RohanBoardApp(App):
         between fan-out steps.
         """
         import time as _t
-        multi = len(self.cfg.clusters) > 1
-        target_pane_id = f"cluster_{cluster_id}"
+
+        targets = self._fanout_targets(cluster_id)
 
         with perf_block("fanout", cluster_id), self.batch_update():
-            for widget in list(self.query("*")):
+            for widget in targets:
                 handler = getattr(widget, "update_snapshot", None)
                 if not callable(handler):
-                    continue
-                if multi and not _is_under_pane(widget, target_pane_id):
+                    # Widget went away (unmounted) since cache was built.
                     continue
                 if perf_enabled():
                     t0 = _t.perf_counter()

@@ -802,11 +802,11 @@ async def test_filter_debounce_coalesces_keystrokes():
     from rohanboard.widgets.jobs_table import JobsTable
 
     rebuild_count = {"n": 0}
-    real_update = JobsTable.update_snapshot
+    real_apply = JobsTable._apply_filter_async
 
-    def trace_update(self, snap):
+    async def trace_apply(self, snap):
         rebuild_count["n"] += 1
-        return real_update(self, snap)
+        return await real_apply(self, snap)
 
     cfg = _make_multi_config_one()
     cfg.layout.tabs = [TabConfig(id="jobs", title="Jobs", widgets=["jobs_table"])]
@@ -825,7 +825,7 @@ async def test_filter_debounce_coalesces_keystrokes():
     with patch("rohanboard.app.slurm.fetch_jobs", new=fake_jobs), \
          patch("rohanboard.app.slurm.fetch_nodes", new=fake_nodes), \
          patch("rohanboard.app.slurm.fetch_recent_jobs", new=fake_recent), \
-         patch.object(JobsTable, "update_snapshot", new=trace_update):
+         patch.object(JobsTable, "_apply_filter_async", new=trace_apply):
         async with app.run_test(size=(160, 40)) as pilot:
             await pilot.pause()
             await pilot.pause()
@@ -846,13 +846,75 @@ async def test_filter_debounce_coalesces_keystrokes():
                     0.15, jt._apply_filter_debounced
                 )
                 await asyncio.sleep(0.02)
-            # Now wait > 150 ms for the timer to fire.
+            # Now wait > 150 ms for the timer to fire, plus a tick for
+            # the worker that the timer schedules.
             await asyncio.sleep(0.30)
+            await pilot.pause()
             await pilot.pause()
             # Exactly ONE rebuild from the debounce, no per-keystroke storm.
             assert rebuild_count["n"] == 1, (
                 f"expected 1 rebuild from debounce; got {rebuild_count['n']} "
                 f"— per-keystroke rebuild storm not coalesced"
+            )
+
+
+@pytest.mark.asyncio
+async def test_apply_filter_via_worker_does_not_block_event_loop():
+    """Lead 2: triggering a filter rebuild via the debounced worker
+    must NOT block the event loop. We assert by racing an
+    `asyncio.sleep(0.001)` against an in-flight chunked rebuild —
+    if the loop is blocked, the sleep won't complete inside its
+    `wait_for(0.05)` budget.
+    """
+    from datetime import datetime
+    from rohanboard.collectors.models import Job, Snapshot
+    from rohanboard.widgets.jobs_table import JobsTable
+
+    cfg = _make_multi_config_one()
+    cfg.layout.tabs = [TabConfig(id="jobs", title="Jobs", widgets=["jobs_table"])]
+
+    # Suppress real ssh/squeue calls — we'll inject the snapshot
+    # directly into the widget instead.
+    async def fake_bulk(self_exec, cmds, timeout=30.0): return {}
+
+    app = RohanBoardApp(config=cfg)
+
+    with patch("rohanboard.exec.LocalExecutor.bulk_run", new=fake_bulk):
+        async with app.run_test(size=(160, 40)) as pilot:
+            await pilot.pause()
+            jt = app.query_one(JobsTable)
+
+            # Build a synthetic 250-row snapshot — more than 50 rows
+            # forces at least 5 chunked yield points.
+            many_jobs = [
+                Job(
+                    job_id=str(i), partition="p", name=f"j{i}", user="u",
+                    state="RUNNING", node_or_reason="n", time_used="00:01:00",
+                    time_left="00:01:00", num_nodes=1, num_cpus=1, tres="cpu=1",
+                    alloc_mem="1G", alloc_gpu="—",
+                )
+                for i in range(250)
+            ]
+            snap = Snapshot(
+                jobs=many_jobs, jobs_mine=many_jobs, recent_jobs=[],
+                nodes=[], storage=[], history=[],
+                fetched_at=datetime.now(), errors={},
+            )
+            jt._last_snapshot = snap
+
+            # Kick off the chunked rebuild via the debounced path.
+            jt._apply_filter_debounced()
+            # Race a tight 1 ms sleep against the in-flight worker — if
+            # the rebuild blocked the loop, this would time out.
+            await asyncio.wait_for(asyncio.sleep(0.001), timeout=0.05)
+            # Sanity-check: the worker actually was scheduled (not just
+            # silently skipped). After a short pause, rows should appear.
+            await pilot.pause()
+            await asyncio.sleep(0.10)
+            await pilot.pause()
+            table = jt.query_one("#jobs_table_dt")
+            assert table.row_count >= 50, (
+                f"chunked rebuild appears not to have run; row_count={table.row_count}"
             )
 
 
