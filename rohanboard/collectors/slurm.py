@@ -54,6 +54,29 @@ _MIG_PROFILE_RE = re.compile(r"^\d+g\.\d+gb$", re.IGNORECASE)
 # treated as GPU specs. Caller filters on the leading group != "CPU".
 _AVAIL_FEAT_GPU_RE = re.compile(r"^([A-Za-z0-9]+)-(\d+(?:\.\d+)?[A-Za-z]+)$")
 
+# Static fallback for clusters whose AvailableFeatures don't encode VRAM
+# (rohan classic: `AvailableFeatures=rtx_a6000`, no hyphen+vram suffix).
+# Keys are lowercased Gres-kind strings; values are the canonical "<N>GB"
+# label that a hyphenated AvailableFeatures would have provided. Applied
+# ONLY when the regex above fails to match — so a hyphenated cluster
+# (LRZ A100-80GB) is never overridden, and a kind missing here cleanly
+# falls through to vram=None (renders as kind alone).
+#
+# Extend when: a new cluster reports `AvailableFeatures=<kind>` (no
+# hyphen+VRAM) AND the kind isn't already in this dict. Keep MIG profile
+# kinds OUT — they encode VRAM in the kind itself (`3g.20gb`).
+_KIND_VRAM_FALLBACK: dict[str, str] = {
+    "a100":      "80GB",   # rohan a100 nodes
+    "a6000":     "48GB",
+    "rtx_a6000": "48GB",   # angmar etc. on rohan
+    "rtx_3090":  "24GB",
+    "rtx_2080":  "11GB",   # 2080 Ti
+    "gtx_1080":  "8GB",    # 1080 Ti
+    "h100":      "80GB",
+    "v100":      "32GB",
+    "p100":      "16GB",
+}
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # squeue
@@ -215,6 +238,13 @@ def _parse_node_block(block: str) -> Node | None:
                 # Gres lacks kind — fall back to AvailableFeatures.
                 resolved_kind = feat_kind or ""
                 resolved_vram = feat_vram
+            # Static-table fallback for clusters where AvailableFeatures
+            # doesn't encode <kind>-<vram> (rohan classic). Only fires when
+            # no native vram was resolved AND the kind is in our table; an
+            # unknown kind cleanly falls through to vram=None (renders as
+            # kind alone, same as before).
+            if not resolved_vram and resolved_kind:
+                resolved_vram = _KIND_VRAM_FALLBACK.get(resolved_kind.lower())
             gpus.append(GpuSpec(
                 kind=resolved_kind,
                 total=int(total),

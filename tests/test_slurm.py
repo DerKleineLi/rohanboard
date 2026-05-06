@@ -118,26 +118,60 @@ def test_parse_node_lrz_cpu():
 
 
 def test_parse_node_rohan_a100():
-    """Regression: rohan classic Gres carries kind, no vram."""
+    """Regression: rohan classic Gres carries kind; AvailableFeatures lacks
+    `<kind>-<vram>` so VRAM comes from `_KIND_VRAM_FALLBACK` (issue #4).
+    """
     n = _one_node("rohan_node_a100.txt")
     assert n.name == "andram"
     g = n.gpus[0]
     assert g.kind == "a100"
-    assert g.vram is None
+    assert g.vram == "80GB"   # static fallback (rohan a100 nodes)
     assert g.total == 4
     assert g.alloc == 4
-    assert g.display == "a100"
 
 
 def test_parse_node_rohan_a6000():
+    """Issue #4: rohan reports `AvailableFeatures=rtx_a6000` (no
+    hyphen+VRAM). The static-table fallback fills in 48GB.
+    """
     n = _one_node("rohan_node_a6000.txt")
     assert n.name == "angmar"
     g = n.gpus[0]
     assert g.kind == "rtx_a6000"
-    assert g.vram is None
+    assert g.vram == "48GB"   # static fallback
     assert g.total == 8
     assert g.alloc == 8
-    assert g.display == "rtx_a6000"
+
+
+def test_parse_node_lrz_a100_80_keeps_native_vram():
+    """Regression-proofs the fallback: LRZ's hyphenated AvailableFeatures
+    (`A100-80GB`) must NOT be overridden by the table — even though the
+    table also has an `a100` entry."""
+    n = _one_node("lrz_node_a100_80.txt")
+    g = n.gpus[0]
+    # LRZ Gres has no kind segment → kind+vram come from AvailableFeatures.
+    assert g.vram == "80GB"
+    assert (g.kind or "").upper() == "A100"
+
+
+def test_parse_node_unknown_kind_no_fallback():
+    """A kind that's NOT in `_KIND_VRAM_FALLBACK` and lacks hyphenated
+    AvailableFeatures must keep `vram=None` — fallback is opt-in per kind.
+    """
+    block = (
+        "NodeName=fake-future-gpu Arch=x86_64 CPUTot=64 CPUAlloc=0 "
+        "CPULoad=0.0 RealMemory=512000 AllocMem=0 FreeMem=512000\n"
+        "   AvailableFeatures=newgpu_xyz\n"
+        "   Gres=gpu:newgpu_xyz:4\n"
+        "   Partitions=test\n"
+        "   AllocTRES=cpu=0\n"
+        "   State=IDLE\n"
+    )
+    nodes = parse_scontrol_show_node(block)
+    assert len(nodes) == 1
+    g = nodes[0].gpus[0]
+    assert g.kind == "newgpu_xyz"
+    assert g.vram is None
 
 
 # ──────────────────────────────────────────────────────────────────────
