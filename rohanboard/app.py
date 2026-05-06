@@ -479,7 +479,26 @@ class RohanBoardApp(App):
         # Stash on the per-cluster dict; broadcast to widgets in this
         # cluster's pane.
         self.snapshots[cluster.id] = snap
-        await self._broadcast_to_cluster(cluster.id, snap)
+        # ── Click-ignore root-cause fix: fire-and-forget the broadcast
+        # ── via run_worker so the input handler (and the next refresh
+        # ── tick) is NOT blocked behind the per-cluster fan-out. Pre
+        # ── 800459d this used run_worker(name="broadcast_snapshot",
+        # ── exclusive=True). The multi-cluster checkpoint inlined it
+        # ── as `await self._broadcast_to_cluster(...)` inside the
+        # ── asyncio.gather loop in `_refresh_all`; that turned every
+        # ── cluster's fan-out into a synchronous step on the event
+        # ── loop, pushing per-press worst-stall from 156-186ms to
+        # ── 297-378ms (empirical bisect, 2026-05-05).
+        # ──
+        # ── Per-cluster `name`+`group` so concurrent broadcasts for
+        # ── DIFFERENT clusters don't cancel each other; only a fresh
+        # ── tick for the SAME cluster supersedes its in-flight one.
+        self.run_worker(
+            self._broadcast_to_cluster(cluster.id, snap),
+            exclusive=True,
+            name=f"broadcast_{cluster.id}",
+            group=f"broadcast_{cluster.id}",
+        )
 
     async def _refresh_cluster_bulk(
         self,

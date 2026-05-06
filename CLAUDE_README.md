@@ -269,3 +269,40 @@
 - `841f917` exec+app: bulk_run + per-cluster scheduling (#2)
 - `594fcc2` jobs_table: debounce filter at 150 ms (#1)
 - `ce8c8b4` overview: bottom-align columns + runtime layout assert (#3)
+
+## Click-ignore root cause + fix (since 2026-05-05)
+
+Even with the v3 fixes (bulk_run, debounce, bottom-align), live tmux filter-bar testing kept showing input drops on slow-typed keystrokes. An empirical bisect against `/tmp/rb_bisect_test.py` (Pilot-driven, 9 chars at 600 ms gap) pinned the regressor at **`800459d` (multi-cluster checkpoint)**:
+
+| State | Per-press worst-stall |
+| --- | --- |
+| pre-`800459d` baseline | 156-186 ms |
+| at `800459d` (regression) | 297-378 ms |
+| HEAD (post-v3) | 171-205 ms (better but still elevated) |
+| **post-fix (this commit)** | **170-213 ms** (in baseline range) |
+
+**Root cause**: `800459d` replaced
+```python
+self.run_worker(self._broadcast_snapshot(new),
+                exclusive=True, name="broadcast_snapshot")
+```
+with
+```python
+await self._broadcast_to_cluster(cluster.id, snap)   # inside asyncio.gather loop
+```
+Inside `_refresh_all`'s `asyncio.gather`, every cluster's fan-out became a synchronous step on the event loop — the input handler was blocked behind it for the duration of N clusters × widget-fan-out. Restoring fire-and-forget via `run_worker` lets the broadcast happen in the background while the input handler stays responsive.
+
+**Fix**: `app.py:_refresh_cluster` now wraps the broadcast call:
+```python
+self.run_worker(
+    self._broadcast_to_cluster(cluster.id, snap),
+    exclusive=True,
+    name=f"broadcast_{cluster.id}",
+    group=f"broadcast_{cluster.id}",
+)
+```
+Per-cluster `name`+`group` so concurrent broadcasts for DIFFERENT clusters don't cancel each other; only a fresh tick for the SAME cluster supersedes its in-flight one.
+
+**General lesson**: any `await foo()` whose body fans out across widgets in a hot per-tick loop should be `run_worker(...)` — Textual's input dispatch shares the same event loop, so a long synchronous async step is indistinguishable from blocking. Bisect via Pilot driver `/tmp/rb_bisect_test.py` — its per-press excess-over-600ms baseline is the canonical metric.
+
+**Live filter-bar tmux test**: still requires manual mouse-click to focus the filter (no `f`/`/` keyboard binding on `nodes_table`/`jobs_table`). For automated verification, the Pilot driver IS the canonical test.
