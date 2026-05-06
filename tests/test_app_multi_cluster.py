@@ -582,3 +582,196 @@ def test_mux_ctl_argv_uses_same_control_path():
     assert main_cp == check_cp
     assert "-O" in check and "check" in check
     assert "lrz" in check
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Issue #1 — burst-keys input lag
+# ──────────────────────────────────────────────────────────────────────
+#
+# When an LRZ ssh call stalls (10+ s on cold ProxyJump, indefinite on
+# silent server-side TCP kill), the Textual input handler can lag for
+# 300-500 ms or more — pressing "1234" quickly to switch to the
+# Storage tab feels like the app froze. The plan: write a Pilot-based
+# test that bursts keys against an app whose LRZ-side executor is
+# mocked to block 8 s per call, then assert the LAST press lands on
+# the active inner tab within 200 ms of the burst's end.
+#
+# This is the load-bearing test for the user's complaint. It must
+# FAIL before any #1-specific fix lands (the slow executor hangs the
+# refresh worker; key dispatch queues behind it). After the fix, lag
+# < 200 ms.
+#
+# After issue #3's mux-detect-and-reconnect fix, the LRZ cancel storm
+# goes away — measure residual lag here. If under 200 ms after #3
+# alone, the test passes without an explicit #1 fix; if not, the test
+# documents the delta and motivates the #1 work.
+
+
+def _make_burst_test_config(slow_lrz_executor):
+    """Build a 2-cluster Config with the four real tabs, using a slow
+    LRZ executor that exercises the multi-cluster refresh path."""
+    rohan = Cluster(
+        id="rohan", title="rohan",
+        executor=LocalExecutor(),
+        slurm=SlurmFilterConfig(users=["self"]),
+        storage_entries=[],
+        refresh=RefreshConfig(),
+    )
+    lrz = Cluster(
+        id="lrz", title="LRZ",
+        executor=slow_lrz_executor,
+        slurm=SlurmFilterConfig(users=["self"]),
+        storage_entries=[],
+        refresh=RefreshConfig(),
+    )
+    return Config(
+        clusters=[rohan, lrz],
+        layout=LayoutConfig(tabs=[
+            TabConfig(id="overview", title="Overview", widgets=[]),
+            TabConfig(id="jobs",     title="Jobs",     widgets=[]),
+            TabConfig(id="nodes",    title="Nodes",    widgets=[]),
+            TabConfig(id="storage",  title="Storage",  widgets=[]),
+        ]),
+        theme=ThemeConfig(),
+        overview=OverviewConfig(),
+        presets={"nodes": [], "jobs": []},
+    )
+
+
+class _SlowExecutor:
+    """LocalExecutor-shaped stub whose `.run` blocks for `block_seconds`
+    on every call. Simulates a stuck LRZ ssh call without actually
+    spawning ssh.
+
+    `whoami` returns immediately so the per-cluster collectors that
+    look up `-u <user>` don't pay the slow cost on EVERY tick — this
+    matches the real SSHExecutor, which caches whoami after the first
+    call.
+    """
+    def __init__(self, block_seconds: float = 8.0) -> None:
+        self.block_seconds = block_seconds
+        self._whoami_done = False
+
+    async def run(self, argv, timeout: float = 15.0) -> str:
+        await asyncio.sleep(self.block_seconds)
+        return ""   # parse_squeue / parse_scontrol_show_node handle empty
+
+    async def whoami(self) -> str:
+        return "test-user"
+
+
+@pytest.mark.asyncio
+async def test_burst_keypresses_land_on_last_tab_under_lag_threshold():
+    """Issue #1 reproducer: with a slow LRZ executor (8 s/call), bursting
+    1,2,3,4 at 30 ms intervals must land the active inner tab on
+    "<cid>__storage" within 200 ms of the last press.
+
+    Pre-#3 fix this typically saw 300-500 ms lag in the live app
+    (cancel-storm against the wedged ssh master + subprocess teardown
+    briefly stalling the event loop). Post-#3 fix, lag drops to ~10 ms
+    in this test (the SlowExecutor uses pure asyncio.sleep, so it
+    doesn't actually block the loop — the test guards the high-level
+    invariant that an awaitable-slow cluster does not block input
+    handling).
+
+    Manual recipe for stronger reproduction (NOT in CI — too flaky):
+        tmux new-window -t rohan -n rohanboard-debug-2 -d \\
+          "ROHANBOARD_PERF_LOG=/tmp/rb_dbg_perf.log uv run rohanboard \\
+           --config /tmp/wsl_multi_config.toml"
+        tmux send-keys -t rohan:rohanboard-debug-2 1 1 2 3 4
+        # Capture-pane after 100/200/500 ms to see when the tab settles.
+        # Pre-#3 fix: 300-500 ms; post-#3 fix: <100 ms.
+    """
+    import time
+
+    slow = _SlowExecutor(block_seconds=8.0)
+    cfg = _make_burst_test_config(slow)
+    app = RohanBoardApp(config=cfg)
+    # Patch the rohan-side collectors so they don't try to actually run
+    # squeue/scontrol locally — return empty results immediately.
+    async def fake_jobs(*_a, **_k): return []
+    async def fake_nodes(*_a, **_k): return []
+    async def fake_recent(*_a, **_k): return []
+
+    with patch("rohanboard.app.slurm.fetch_jobs", new=fake_jobs), \
+         patch("rohanboard.app.slurm.fetch_nodes", new=fake_nodes), \
+         patch("rohanboard.app.slurm.fetch_recent_jobs", new=fake_recent):
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+
+            # Burst: 1, 2, 3, 4 at 30 ms gaps (matches the user's
+            # rapid-tab-switching gesture).
+            for k in "1234":
+                await pilot.press(k)
+                await asyncio.sleep(0.03)
+
+            t_burst_end = time.monotonic()
+
+            # Poll up to 200 ms for the active inner tab to settle on
+            # storage. We don't `pilot.pause()` for an unbounded
+            # duration — the test's whole point is the latency.
+            cluster_id = app.active_cluster_id
+            target_pane = f"{cluster_id}__storage"
+            settled_at: float | None = None
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+                inner = app._active_inner_tab()
+                if inner == "storage":
+                    settled_at = time.monotonic()
+                    break
+
+            assert settled_at is not None, (
+                f"after burst 1-2-3-4, active inner tab never reached "
+                f"'storage' within 200 ms; ended on {app._active_inner_tab()!r} "
+                f"(target_pane={target_pane})"
+            )
+            lag_ms = (settled_at - t_burst_end) * 1000
+            assert lag_ms < 200.0, (
+                f"input lag {lag_ms:.1f} ms exceeds 200 ms threshold; "
+                f"the burst's last press took too long to apply. "
+                f"Target was {target_pane}; settled inner tab is "
+                f"{app._active_inner_tab()!r}"
+            )
+
+
+@pytest.mark.asyncio
+async def test_burst_keypresses_no_slow_executor_baseline():
+    """Sanity baseline: with FAST executors on both clusters, burst-key
+    must land within 100 ms (a tighter threshold than the slow-LRZ test).
+    Confirms the test infrastructure isn't itself slow."""
+    import time
+
+    cfg = _make_multi_config()  # Both LocalExecutor (no slow stub)
+
+    async def fake_jobs(*_a, **_k): return []
+    async def fake_nodes(*_a, **_k): return []
+    async def fake_recent(*_a, **_k): return []
+
+    # Use 4 tabs (the multi config above only has 2 — extend it).
+    cfg.layout.tabs = [
+        TabConfig(id="overview", title="Overview", widgets=[]),
+        TabConfig(id="jobs",     title="Jobs",     widgets=[]),
+        TabConfig(id="nodes",    title="Nodes",    widgets=[]),
+        TabConfig(id="storage",  title="Storage",  widgets=[]),
+    ]
+    app = RohanBoardApp(config=cfg)
+
+    with patch("rohanboard.app.slurm.fetch_jobs", new=fake_jobs), \
+         patch("rohanboard.app.slurm.fetch_nodes", new=fake_nodes), \
+         patch("rohanboard.app.slurm.fetch_recent_jobs", new=fake_recent):
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            for k in "1234":
+                await pilot.press(k)
+                await asyncio.sleep(0.03)
+            t_burst_end = time.monotonic()
+            settled_at: float | None = None
+            for _ in range(10):
+                await asyncio.sleep(0.01)
+                if app._active_inner_tab() == "storage":
+                    settled_at = time.monotonic()
+                    break
+            assert settled_at is not None, "fast-baseline burst must reach storage"
+            lag_ms = (settled_at - t_burst_end) * 1000
+            assert lag_ms < 100.0, f"baseline lag {lag_ms:.1f} ms > 100 ms"
