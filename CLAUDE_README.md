@@ -226,3 +226,46 @@
 - `ca9b1f8` exec: per-call timeout marks mux dead + shielded warm-master (#3)
 - `ba3da9d` tests: burst-keys input-lag guard for issue #1
 - `dcb4ac1` exec: don't mark mux dead on slow-call timeout (only on warm-timeout)
+
+## 3-issue v3 fixes (since 2026-05-06)
+
+### `bulk_run` coalesces N collector ssh calls into 1 round-trip (#2)
+- `Executor.bulk_run(name_to_argv, timeout)` is the canonical fix for "per-host Semaphore(1) + asyncio.gather of N is fully serial" (per saved memory `feedback_asyncio_subprocess_cancel_leaks.md`).
+- **SSHExecutor.bulk_run** packs all N commands into ONE `bash -c` script that BACKGROUNDs each subshell (`(cmd > tmpfile) &`) and `wait`s, then emits sentinel-framed output (`---RBOUTBEGIN:<token>:<name>---` / `---RBOUTEND:...`). Token is a 16-char random hex per call so a collector's stdout that contains a literal sentinel cannot confuse demux.
+- Wall-clock drops from `sum(per-call)` to `max(per-call)` — for LRZ that's ~10 s (dssusrinfo) instead of ~5+ s sequential.
+- **LocalExecutor.bulk_run** runs commands in parallel via `asyncio.gather` (no semaphore on local).
+- **Rule**: any `executor.run × N inside an asyncio.gather` IS A BUG. Use `bulk_run`.
+- The orchestrator (`_refresh_cluster_bulk` in `app.py`) builds 4 collector argvs upfront (`slurm.build_jobs_argv`, `build_recent_jobs_argv`, `nodes_argv`, plus the storage entry's argv) and calls `bulk_run` ONCE per cluster tick. Single semaphore acquisition.
+- Tmpvars in the bulk script use INDEX-based names (`_rb_tmp_0`, `_rb_tmp_1`...) — name-derived tmpvars break bash when the slot has spaces / parens (e.g. `storage:home (quota)` from the rohan config).
+- Tests: `tests/test_exec.py::test_bulk_run_*` (5 tests) — N→1 reduction, single-acquisition, unguessable-per-call tokens, LocalExecutor parity.
+
+### Per-cluster scheduling + skip-if-running (#2 follow-up)
+- Each cluster gets its OWN timer at its OWN `min(refresh.*)` interval (was: one shared timer at `min` across ALL clusters). LRZ's slow ticks (~10 s with cold ssh) no longer cancel rohan's fast ticks (5 s).
+- **Skip-if-running** replaces `exclusive=True` worker cancellation: if a tick for cluster X is still in flight when its timer fires again, the new tick is silently DROPPED. The previous tick is allowed to complete naturally; the user sees the previous-good snapshot until then. Without this, every LRZ tick taking >5 s gets cancelled before broadcast → "loading…" forever.
+- Implementation: `App._tick_inflight: dict[str, bool]`. The timer callback checks `_tick_inflight[cluster.id]` and returns early if true.
+- **Preserve previous snapshot on empty bulk**: if a tick produces 0 nodes/jobs/storage AND a previous tick succeeded, the orchestrator keeps the prior `self.snapshots[cid]` rather than blanking it. Belt-and-braces guard for the cancel-mid-flight case.
+- **Defer `_push_snapshot` via `call_after_refresh`** in `OverviewPanel.update_snapshot` — newly-mounted cards from `_populate` haven't finished compose() yet; a synchronous push silently fails on `query_one(...)` against half-mounted children. Without this defer, LRZ Overview stayed stuck on "loading…" even when fanouts WERE firing.
+
+### Filter-bar debounce at 150 ms (#1)
+- `JobsTable.on_input_changed` now schedules a `set_timer(0.15, _apply_filter_debounced)` instead of synchronously rebuilding the DataTable on every keystroke.
+- Without debounce, every keystroke ran a full DataTable rebuild that — under refresh-tick pressure (the cancel-storm from #2) — starved Textual's input dispatch and dropped ~50% of slow keystrokes (typing "test hello" with 600 ms gaps yielded "ttel" pre-fix).
+- 150 ms is short enough to feel responsive (table updates within 150 ms of user pause) and long enough to coalesce typing.
+- `watch_filter_text` is now a NO-OP — debounce drives all rebuilds.
+- Test: `test_filter_debounce_coalesces_keystrokes` in `test_app_multi_cluster.py` — Pilot-driven, types 5 chars in <150 ms, asserts EXACTLY 1 rebuild fired (not 5). Caveat per saved memory `feedback_tmux_burstkey_input_test.md`: live tmux test (one-key-at-a-time at 600 ms gap) is the gold standard; Pilot can't fully reproduce loop starvation under real-world refresh pressure.
+
+### Bottom-aligned columns via flex-last-card + runtime assertion (#3)
+- The 87ed9cc `layout: horizontal` fix made each column content-sized — no padding inside the row, but the SHORTER column ended early, leaving a 4-row asymmetric gap before the ASCII pane (149×44 measured: left col `╰` row 28, right col `╰` row 24).
+- v3 fix: `#main` height is pinned imperatively to `target = max(left_nat, right_nat)` (so `.col { height: 100% }` resolves to a concrete value) AND the LAST card in each column gets `.flex` (CSS `height: 1fr`) so it absorbs the column's slack. The visible `╰` of the last card bottom-aligns with the sibling col's last `╰`.
+- The original v3-plan-suggested `col-spacer` approach (a 1fr Static at the bottom of each column) DOESN'T WORK in Textual because `Vertical` doesn't honor `1fr` children inside `height: auto` parents — the spacer collapsed to 0 rows.
+- `_make_util` imperatively pins UtilizationPanel to `UTIL_MIN_HEIGHT = 13` so it doesn't demand 1fr of its content-sized parent column. When Util ends up as the LAST card (right col with util_side="right"), `_populate` clears that imperative height (`util.styles.height = None`) so the `.flex` CSS rule wins.
+- **Runtime assertion** (env-gated): `_verify_layout_aligned` raises `AssertionError` if `last_card_left.region.bottom != last_card_right.region.bottom (±1)`. Wired into `_populate` via `call_after_refresh`. Off in production (cost), on in CI/dev with `ROHANBOARD_LAYOUT_ASSERT=1`.
+- General Textual rule: when you need bottom-alignment of two columns of different content height, the canonical pattern is:
+  1. Set the parent's height imperatively to `max(child_natural)` (NOT `auto` — that creates a circular sizing dep with `100%` children).
+  2. Set children to `height: 100%` so they stretch to the parent.
+  3. Give the LAST card in each child `height: 1fr` so it absorbs slack.
+- Tests: 4 new `test_columns_bottom_align_in_wide_fit` parametrized cases at 140×40 / 180×50 × rohan/lrz shapes + 2 new runtime-assertion tests.
+
+### Recent change log (continued)
+- `841f917` exec+app: bulk_run + per-cluster scheduling (#2)
+- `594fcc2` jobs_table: debounce filter at 150 ms (#1)
+- `ce8c8b4` overview: bottom-align columns + runtime layout assert (#3)
