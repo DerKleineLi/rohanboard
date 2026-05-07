@@ -80,3 +80,9 @@ Pure parser/layout commits cherry-pick clean (deferred to relevant phase):
   - Verified tests pass at baseline. ✓ (5/5 — pre-Executor era; richer suite arrives in 4b+)
   - Launched verification pane at `tmux:rohan:rb-v2-reset` against `/tmp/wsl_single_v2reset_config.toml`. ✓ (Overview tab renders all three default widgets: storage_panel, jobs_table, nodes_summary; squeue/scontrol Errno expected — no slurm on WSL.)
   - Pre-Reset checkpoint: an unrelated dirty `CLAUDE_README.md` (smoke-warmup + widget-audit notes) was committed first as `b9436f0` on `clean-reimpl` per `feedback_dirty_tree_subagent_brief.md`.
+
+- **4a (2026-05-07):**
+  - Added `asyncssh` runtime dep (resolved: 2.22.0). ✓
+  - Added `pytest-asyncio` dev dep (resolved: 1.3.0). ✓
+  - Tests still 5/5 at v2. ✓
+  - Verification pane restarted. ✓ (Overview tab renders all three default widgets: storage_panel, jobs_table, nodes_summary; squeue/scontrol Errno expected — no slurm on WSL.)
