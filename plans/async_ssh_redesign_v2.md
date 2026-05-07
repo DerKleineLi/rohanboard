@@ -74,8 +74,9 @@ Pure parser/layout commits cherry-pick clean (deferred to relevant phase):
 
 (Filled in as phases complete.)
 
-- **Reset (in progress 2026-05-07):**
-  - Tagged `clean-reimpl-bc-attempt` at `43d2e02`. ✓/✗
-  - Created branch `clean-reimpl-v2` off `0612f58`. ✓/✗
-  - Verified tests pass at baseline. ✓/✗
-  - Launched verification pane at `tmux:rohan:rb-v2-reset` against `/tmp/wsl_single_v2reset_config.toml`. ✓/✗
+- **Reset (done 2026-05-07):**
+  - Tagged `clean-reimpl-bc-attempt` at `43d2e02`. ✓
+  - Created branch `clean-reimpl-v2` off `0612f58`. ✓
+  - Verified tests pass at baseline. ✓ (5/5 — pre-Executor era; richer suite arrives in 4b+)
+  - Launched verification pane at `tmux:rohan:rb-v2-reset` against `/tmp/wsl_single_v2reset_config.toml`. ✓ (Overview tab renders all three default widgets: storage_panel, jobs_table, nodes_summary; squeue/scontrol Errno expected — no slurm on WSL.)
+  - Pre-Reset checkpoint: an unrelated dirty `CLAUDE_README.md` (smoke-warmup + widget-audit notes) was committed first as `b9436f0` on `clean-reimpl` per `feedback_dirty_tree_subagent_brief.md`.
