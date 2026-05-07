@@ -38,21 +38,29 @@ Native async ssh client. Persistent connection per cluster, native multi-session
 3. **Single-consumer message queue respect.** Handlers must return in <50 ms; longer work goes through a worker.
 4. **No subprocess.run on the asyncio loop, no thread bouncing.** Pure asyncio + asyncssh.
 
-## Phase plan
+## Phase plan (re-ordered 2026-05-07 per user feedback msg 5633)
+
+The reorder pulls SSH wiring forward so the input-handling fix (chunked rebuild)
+gets validated under real single-cluster SSH BEFORE multi-cluster scaffolding
+layers in. Catches the dual-SSH bug class without conflating it with multi-cluster
+scaffolding bugs. AsyncSSHExecutor also gets exercised much earlier, less
+stub-bitrot risk.
 
 | Phase | Scope | Test gate | Approval gate |
 |---|---|---|---|
-| Reset | branch tag + new branch + plan file (this phase) | tests at `0612f58` baseline pass | user smokes the v2-reset board pane |
+| Reset | branch tag + new branch + plan file | tests at `0612f58` baseline pass | user smokes the v2-reset board pane |
 | 4a | asyncssh + pytest-asyncio dev deps via `uv add` | tests still green | user approves dep additions |
-| 4b | `exec.py` from scratch: `Executor` Protocol + `LocalExecutor` + `AsyncSSHExecutor`. Collectors take Executor as 1st arg. | new `tests/test_exec.py`; collectors parametrized on `FakeLocalExecutor` | user approves API shape |
-| 4c | `cluster.py` + multi-cluster TOML + legacy single-cluster shim + `--cluster <id>` CLI | `tests/test_config.py` covers multi-cluster + legacy | user approves config schema |
-| 4d | Outer cluster-tab UI + per-cluster snapshots + `c` cycle binding + scoped `_broadcast_to_cluster` + **chunked DataTable rebuild from day one** | outer-tab presence + chunked-rebuild yields + scoped-broadcast tests | user smokes outer cluster cycle |
-| 4e | Wire LRZ via AsyncSSHExecutor; parser cherry-picks (storage entry parsing, GPU column) | 60 s smoke: 0 stuck procs, ≤2 connections | drop-test < 5% baseline |
-| 4f | dssusrinfo + auto_lrz storage; `Snapshot.jobs` / `.jobs_mine` split; `log_path_map`; log_tail screen | LRZ storage end-to-end | user spot-checks LRZ panel |
-| 4g | Overview wide+scroll fallback (layout cherry-picks) | static layout decision-table test | user smokes layout |
-| 4h | B+C re-implementation: `SnapshotUpdated(Message)` thread-safe wakeup + 250 ms coalesce throttle (NOT re-using current branch's code; pattern only) | 5×5 pilot drop-test on dual-cluster | dual-SSH < 5% drop confirmed |
+| 4b | `exec.py` from scratch: Executor + LocalExecutor + AsyncSSHExecutor stub. Collectors take Executor as 1st arg. | new `tests/test_exec.py`; collectors parametrized on FakeLocalExecutor | user approves API shape |
+| **4c (NEW)** | Single-cluster SSH wiring. Add `exec = "local"` / `exec = "ssh:<host>"` to TOML. App init picks AsyncSSHExecutor when SSH. Lifecycle: connect on mount, aclose on unmount. AsyncSSHExecutor goes from stub → genuinely runnable. | tests for picker; live smoke against `ssh:rohan` | user smokes single-cluster-SSH pane |
+| **4d (NEW)** | Chunked DataTable rebuild (day-one constraint). `update_snapshot` mirrors `_apply_filter_async`'s yield-every-50-mutations pattern. | Existing tests + new chunked-rebuild test | user drop-tests input under single-cluster SSH |
+| 4e (was 4c) | `cluster.py` + multi-cluster TOML + legacy single-cluster shim + `--cluster <id>` CLI. Data model only, no UI yet. | `tests/test_config.py` covers multi-cluster + legacy | user approves config schema |
+| 4f (was old-4d minus chunked-rebuild) | Outer cluster-tab UI + per-cluster snapshots + scoped `_broadcast_to_cluster` + `c` cycle binding | outer-tab presence + scoped-broadcast tests | user smokes outer cluster cycle |
+| 4g (was 4e) | Wire LRZ via AsyncSSHExecutor alongside rohan; parser cherry-picks (storage entry parsing, GPU column) | 60 s smoke: 0 stuck procs, ≤2 connections | drop-test < 5% baseline |
+| 4h (was 4f) | dssusrinfo + auto_lrz storage; `Snapshot.jobs` / `.jobs_mine` split; `log_path_map`; log_tail screen | LRZ storage end-to-end | user spot-checks LRZ panel |
+| 4i (was 4g) | Overview wide+scroll fallback (layout cherry-picks) | static layout decision-table test | user smokes layout |
+| 4j (was 4h) | B+C re-implementation: `SnapshotUpdated(Message)` thread-safe wakeup + 250 ms coalesce throttle (NOT re-using current branch's code; pattern only) | 5×5 pilot drop-test on dual-cluster | dual-SSH < 5% drop confirmed |
 
-Effort estimate: 12-16 hr over 8 commits. Each phase commit-sized, independently testable.
+Effort estimate: 14–18 hr over 10 commits (slight bump from 12–16 hr / 8 commits to separate SSH wiring + chunked rebuild from multi-cluster).
 
 ## Cherry-pick targets
 
