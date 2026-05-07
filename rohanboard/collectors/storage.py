@@ -1,28 +1,14 @@
 """Storage collectors: per-user `quota` and per-mount `df`."""
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 
+from ..exec import Executor
 from .models import StorageEntry
 
 
 _QUOTA_NUM_RE = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)")
-
-
-async def _run(cmd: list[str], timeout: float = 10.0) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise
-    return proc.returncode or 0, stdout.decode(), stderr.decode()
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -73,11 +59,16 @@ def parse_quota(text: str, label: str, filesystem: str | None = None) -> Storage
     return None
 
 
-async def fetch_quota(label: str, filesystem: str | None, user: str | None = None) -> StorageEntry | None:
+async def fetch_quota(
+    executor: Executor,
+    label: str,
+    filesystem: str | None,
+    user: str | None = None,
+) -> StorageEntry | None:
     user = user or os.environ.get("USER", "")
     if not user:
         return None
-    rc, out, err = await _run(["quota", "-u", user])
+    rc, out, err = await executor.run(["quota", "-u", user], timeout=10.0)
     # `quota` returns non-zero when the user is over quota — output is still valid.
     text = out or err
     return parse_quota(text, label=label, filesystem=filesystem)
@@ -112,8 +103,8 @@ def parse_df(text: str, label: str, path: str) -> StorageEntry | None:
     return None
 
 
-async def fetch_df(label: str, path: str) -> StorageEntry | None:
-    rc, out, err = await _run(["df", "-B1", path])
+async def fetch_df(executor: Executor, label: str, path: str) -> StorageEntry | None:
+    rc, out, err = await executor.run(["df", "-B1", path], timeout=10.0)
     if rc != 0:
         return None
     return parse_df(out, label=label, path=path)

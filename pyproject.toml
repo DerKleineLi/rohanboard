@@ -48,3 +48,8 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=1.3.0",
 ]
+
+[tool.pytest.ini_options]
+# Mark async-def tests automatically — saves an `@pytest.mark.asyncio` per
+# test in tests/test_exec.py and elsewhere.
+asyncio_mode = "auto"

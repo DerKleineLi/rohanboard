@@ -5,11 +5,11 @@ through stable text formats: `squeue -h -o ...` and `scontrol show node --all`.
 """
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 from typing import Iterable
 
+from ..exec import Executor
 from .models import GpuSpec, Job, Node
 
 
@@ -177,26 +177,20 @@ def parse_scontrol_show_node(text: str) -> list[Node]:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# subprocess wrappers (async)
+# Executor-backed wrappers
 # ──────────────────────────────────────────────────────────────────────────
 
-async def _run(cmd: list[str], timeout: float = 15.0) -> str:
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise
-    if proc.returncode != 0:
-        raise RuntimeError(f"{cmd[0]} failed ({proc.returncode}): {stderr.decode().strip()}")
-    return stdout.decode()
+async def _run_checked(executor: Executor, cmd: list[str], timeout: float = 15.0) -> str:
+    """Run via Executor; raise RuntimeError on non-zero rc.  Slurm collectors
+    treat non-zero as a real failure (callers either propagate or fall back
+    to a different command, e.g. scontrol → sacct in fetch_job_info)."""
+    rc, stdout, stderr = await executor.run(cmd, timeout=timeout)
+    if rc != 0:
+        raise RuntimeError(f"{cmd[0]} failed ({rc}): {stderr.strip()}")
+    return stdout
 
 
-async def fetch_jobs(users: list[str] | None = None) -> list[Job]:
+async def fetch_jobs(executor: Executor, users: list[str] | None = None) -> list[Job]:
     """`users=['self']` → current user only; ['all'] or None → all users."""
     args = ["squeue", "-h", "-O", SQUEUE_O_FORMAT]
     if users and "all" not in users:
@@ -204,12 +198,12 @@ async def fetch_jobs(users: list[str] | None = None) -> list[Job]:
         resolved = [u for u in resolved if u]
         if resolved:
             args += ["-u", ",".join(resolved)]
-    text = await _run(args)
+    text = await _run_checked(executor, args)
     return parse_squeue(text)
 
 
-async def fetch_nodes() -> list[Node]:
-    text = await _run(["scontrol", "show", "node", "--all"])
+async def fetch_nodes(executor: Executor) -> list[Node]:
+    text = await _run_checked(executor, ["scontrol", "show", "node", "--all"])
     return parse_scontrol_show_node(text)
 
 
@@ -295,7 +289,7 @@ def parse_sacct_row(text: str) -> dict[str, str]:
     }
 
 
-async def fetch_job_info(job_id: str) -> dict[str, str]:
+async def fetch_job_info(executor: Executor, job_id: str) -> dict[str, str]:
     """Job info dict.  Prefers `scontrol show job` (richest source) and falls
     back to `sacct` for completed jobs that slurmctld no longer holds in memory.
     Returns an empty dict if both sources fail (caller should handle that).
@@ -305,7 +299,7 @@ async def fetch_job_info(job_id: str) -> dict[str, str]:
     caller can show users where the data came from."""
     scontrol_cmd = ["scontrol", "show", "job", str(job_id)]
     try:
-        text = await _run(scontrol_cmd)
+        text = await _run_checked(executor, scontrol_cmd)
     except RuntimeError:
         # scontrol fails (typically: "Invalid job id specified") for jobs that
         # have left the controller's memory.  Fall back to the accounting db.
@@ -313,7 +307,7 @@ async def fetch_job_info(job_id: str) -> dict[str, str]:
             "sacct", "-j", str(job_id), "-X", "-P", "-n",
             "-o", ",".join(_SACCT_FALLBACK_FIELDS),
         ]
-        text = await _run(sacct_cmd)
+        text = await _run_checked(executor, sacct_cmd)
         d = parse_sacct_row(text)
         if d:
             d["_source"] = " ".join(sacct_cmd)
@@ -324,26 +318,27 @@ async def fetch_job_info(job_id: str) -> dict[str, str]:
     return d
 
 
-async def fetch_job_script(job_id: str) -> str:
+async def fetch_job_script(executor: Executor, job_id: str) -> str:
     """Original batch script body.  Live jobs: `scontrol write batch_script
     <id> -` (last arg `-` writes to stdout).  Completed jobs: falls back to
     `sacct -j <id> --batch-script` (Slurm 20.11+)."""
     try:
-        return await _run(["scontrol", "write", "batch_script", str(job_id), "-"])
+        return await _run_checked(executor, ["scontrol", "write", "batch_script", str(job_id), "-"])
     except RuntimeError:
         # sacct emits the script straight to stdout (no pipe-format header).
-        return await _run(["sacct", "-j", str(job_id), "--batch-script"])
+        return await _run_checked(executor, ["sacct", "-j", str(job_id), "--batch-script"])
 
 
-async def fetch_job_env(job_id: str) -> str:
+async def fetch_job_env(executor: Executor, job_id: str) -> str:
     """Environment variables snapshot at submission time.  Only available
     for jobs slurmctld still has in memory (live or very recently completed).
     Raises RuntimeError when Slurm doesn't have it — caller should treat that
     as 'unavailable' rather than an error."""
-    return await _run(["scontrol", "getenvironment", str(job_id)])
+    return await _run_checked(executor, ["scontrol", "getenvironment", str(job_id)])
 
 
 async def fetch_recent_jobs(
+    executor: Executor,
     users: list[str] | None = None,
     starttime: str = "now-3days",
     limit: int = 50,
@@ -358,7 +353,7 @@ async def fetch_recent_jobs(
         # sacct defaults to the invoking user when no -u is given; -a /
         # --allusers is required to actually see everyone's history.
         args += ["-a"]
-    text = await _run(args, timeout=20.0)
+    text = await _run_checked(executor, args, timeout=20.0)
     jobs = parse_sacct(text)
     # Most-recent first; sacct returns ascending JobID, reverse.
     return list(reversed(jobs))[:limit]

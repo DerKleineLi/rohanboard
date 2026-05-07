@@ -19,6 +19,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Footer, RichLog, Static, TabbedContent, TabPane
 
 from ..collectors import slurm
+from ..exec import Executor
 
 
 TABS: tuple[str, ...] = ("stdout", "stderr", "script", "info")
@@ -103,9 +104,10 @@ class LogTailScreen(ModalScreen):
         Binding("e", "next_tab", "Cycle stdout/stderr/script/env"),
     ]
 
-    def __init__(self, job_id: str) -> None:
+    def __init__(self, job_id: str, executor: Executor) -> None:
         super().__init__()
         self.job_id = job_id
+        self.executor = executor
         self._info: dict[str, str] = {}
         # Per-stream file handles + polling state
         self._fh: dict[str, object | None] = {"stdout": None, "stderr": None}
@@ -130,7 +132,7 @@ class LogTailScreen(ModalScreen):
 
     async def on_mount(self) -> None:
         try:
-            self._info = await slurm.fetch_job_info(self.job_id)
+            self._info = await slurm.fetch_job_info(self.executor, self.job_id)
         except Exception as e:
             self._write("stdout", f"[error] could not fetch job info "
                                   f"(scontrol + sacct both failed): {e}")
@@ -230,7 +232,7 @@ class LogTailScreen(ModalScreen):
         log = self.query_one("#log_script", RichLog)
         log.write("[fetching batch script…]")
         try:
-            text = await slurm.fetch_job_script(self.job_id)
+            text = await slurm.fetch_job_script(self.executor, self.job_id)
         except Exception as e:
             text = f"[batch script unavailable: {e}]"
         self._script_done = True

@@ -476,7 +476,15 @@ class JobsTable(Widget):
             self.app.notify("Selected row has no job id.", severity="warning")
             return
         from ..screens.log_tail import LogTailScreen
-        self.app.push_screen(LogTailScreen(job_id))
+        # The app instantiates its Executor in __init__; reach for it here so
+        # the screen's slurm calls go through the same execution path as the
+        # main refresh loop.
+        executor = getattr(self.app, "executor", None)
+        if executor is None:
+            self.app.notify("App has no executor — cannot fetch job info.",
+                            severity="error")
+            return
+        self.app.push_screen(LogTailScreen(job_id, executor))
 
     # ── filter ──────────────────────────────────────────────
 

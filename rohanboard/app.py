@@ -17,6 +17,7 @@ from collections import deque
 from .collectors import slurm, storage
 from .collectors.models import Snapshot, StorageEntry, UtilizationSample
 from .config import Config, load as load_config
+from .exec import Executor, LocalExecutor
 from .perf import perf_block, perf_enabled, perf_log
 from .widgets.jobs_table import JobsTable
 from .widgets.nodes_table import NodesSummary, NodesTable
@@ -54,6 +55,11 @@ class RohanBoardApp(App):
         # The "Mine only" pill in the Jobs tab flips this and triggers a
         # fresh fetch — no need for client-side filtering.
         self.mine_only: bool = True
+        # Phase 4b: collectors take an Executor.  Single-cluster (= local
+        # box, since `0612f58` ran sluum/df directly on rohan via the user
+        # being logged in there) gets a LocalExecutor.  Phase 4c+ swap this
+        # for a per-cluster mapping.
+        self.executor: Executor = LocalExecutor()
         # Widget factories can reference per-widget config (e.g. filter presets).
         node_presets = self.cfg.presets.get("nodes", [])
         job_presets = self.cfg.presets.get("jobs", [])
@@ -121,6 +127,15 @@ class RohanBoardApp(App):
         # See https://github.com/Textualize/textual/issues/6381
         gc.collect()
         gc.freeze()
+
+    async def on_unmount(self) -> None:
+        # Close the executor's persistent resources (no-op for LocalExecutor;
+        # for AsyncSSHExecutor in Phase 4e+ this closes the asyncssh
+        # connection so the process exits cleanly on quit).
+        try:
+            await self.executor.aclose()
+        except Exception:
+            pass
 
     async def action_refresh(self) -> None:
         self.notify("Refreshing…", timeout=1)
@@ -192,21 +207,21 @@ class RohanBoardApp(App):
         async def grab_jobs():
             try:
                 with perf_block("collect", "jobs"):
-                    snap.jobs = await slurm.fetch_jobs(users_for_fetch)
+                    snap.jobs = await slurm.fetch_jobs(self.executor, users_for_fetch)
             except Exception as e:
                 snap.errors["jobs"] = str(e)
 
         async def grab_recent():
             try:
                 with perf_block("collect", "recent"):
-                    snap.recent_jobs = await slurm.fetch_recent_jobs(users_for_fetch)
+                    snap.recent_jobs = await slurm.fetch_recent_jobs(self.executor, users_for_fetch)
             except Exception as e:
                 snap.errors["recent_jobs"] = str(e)
 
         async def grab_nodes():
             try:
                 with perf_block("collect", "nodes"):
-                    nodes = await slurm.fetch_nodes()
+                    nodes = await slurm.fetch_nodes(self.executor)
                 if self.cfg.slurm.include_partitions:
                     inc = set(self.cfg.slurm.include_partitions)
                     nodes = [n for n in nodes if any(p in inc for p in n.partitions)]
@@ -226,13 +241,13 @@ class RohanBoardApp(App):
             for entry_cfg in self.cfg.storage_entries:
                 try:
                     if entry_cfg.kind == "quota":
-                        e = await storage.fetch_quota(entry_cfg.label, entry_cfg.filesystem)
+                        e = await storage.fetch_quota(self.executor, entry_cfg.label, entry_cfg.filesystem)
                         if e is not None:
                             entries.append(e)
                     elif entry_cfg.kind == "df":
                         if not entry_cfg.path:
                             continue
-                        e = await storage.fetch_df(entry_cfg.label, entry_cfg.path)
+                        e = await storage.fetch_df(self.executor, entry_cfg.label, entry_cfg.path)
                         if e is not None:
                             entries.append(e)
                     elif entry_cfg.kind == "auto":
@@ -240,7 +255,7 @@ class RohanBoardApp(App):
                         discovered = storage.discover_mounts(prefixes)
                         # df all of them in parallel
                         results = await asyncio.gather(
-                            *[storage.fetch_df(label, path) for label, path in discovered],
+                            *[storage.fetch_df(self.executor, label, path) for label, path in discovered],
                             return_exceptions=True,
                         )
                         for r in results:
