@@ -86,3 +86,14 @@ Pure parser/layout commits cherry-pick clean (deferred to relevant phase):
   - Added `pytest-asyncio` dev dep (resolved: 1.3.0). ✓
   - Tests still 5/5 at v2. ✓
   - Verification pane restarted. ✓ (Overview tab renders all three default widgets: storage_panel, jobs_table, nodes_summary; squeue/scontrol Errno expected — no slurm on WSL.)
+
+- **4b (2026-05-07):**
+  - `rohanboard/exec.py` shipped (241 LoC): `Executor` Protocol + `LocalExecutor` (asyncio subprocess) + `AsyncSSHExecutor` (asyncssh persistent connection, lazy `connect()`). ✓
+  - Cancellation-safe per `feedback_asyncio_subprocess_cancel_leaks.md`: catch-`BaseException` + `proc.kill()` + `await asyncio.shield(proc.wait())` + re-raise. ✓
+  - `asyncio.wait_for` wraps both `connect()` and `conn.run()` since asyncssh's own timeout doesn't always apply (asyncssh#21, #411, #626). ✓
+  - Collectors migrated: `slurm.fetch_*` and `storage.fetch_*` take `executor: Executor` as 1st arg; private `_run()` helpers replaced by `executor.run()` calls. `slurm.py` keeps a thin `_run_checked()` that raises on rc!=0 (preserves `fetch_job_info`'s scontrol→sacct fallback). ✓
+  - App instantiates `LocalExecutor` in `__init__`, `aclose()`s in new `on_unmount`. JobsTable's `action_tail_log` forwards the executor to `LogTailScreen`. ✓
+  - `tests/test_exec.py`: 15 new cases (Protocol conformance × 3, LocalExecutor happy path × 4, timeout reap, cancellation kills child via marker-pgrep, FakeLocalExecutor × 3, AsyncSSHExecutor stub × 2). FakeLocalExecutor fixture available for collector tests in 4c+. ✓
+  - `[tool.pytest.ini_options] asyncio_mode = "auto"` added so async tests don't need `@pytest.mark.asyncio`. ✓
+  - Tests: 20/20 green. ✓
+  - Verification pane restart pending — same Overview as before (no behavior change).
