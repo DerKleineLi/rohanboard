@@ -64,9 +64,10 @@ class ThemeConfig:
 
 @dataclass
 class OverviewConfig:
-    # One of: "art" (static rohan logo), "matrix" (cmatrix rain),
-    #         "fire" (DOOM PSX fire), or "none" (hide the decoration).
-    animation: str = "art"
+    # One of: "matrix" (cmatrix rain — rohan-canonical), "art" (static
+    #         rohan logo), "fire" (DOOM PSX fire), or "none" (hide the
+    #         decoration).
+    animation: str = "matrix"
 
 
 @dataclass
@@ -178,7 +179,7 @@ def load(path: Path | None = None) -> Config:
         cfg.theme = ThemeConfig(file=str(t.get("file", "default.tcss")))
 
     if o := raw.get("overview"):
-        cfg.overview = OverviewConfig(animation=str(o.get("animation", "art")))
+        cfg.overview = OverviewConfig(animation=str(o.get("animation", "matrix")))
 
     # Phase 4c: top-level `exec` picks the Executor backend. We validate the
     # shape here at load time so a malformed `exec = "garbage"` fails fast
