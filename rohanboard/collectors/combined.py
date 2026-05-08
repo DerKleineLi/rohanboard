@@ -1,0 +1,175 @@
+"""Combined collector — one ssh channel per refresh tick.
+
+Coalesces mount-fetch + df-fanout + quota + squeue + sacct + scontrol
+into ONE remote shell invocation that runs sub-commands in parallel via
+`&` + `wait`, then emits sectioned output the client splits.
+
+Why: rohan's sshd `MaxSessions 10` (default) caps concurrent SSH channels
+per asyncssh connection. The naive per-collector parallel pattern fired
+30+ channels per refresh tick — the first ~10 succeeded, the rest got
+silently rejected by sshd (asyncssh raises, gather drops the exception).
+The Storage tab's auto-discovery branch alone produces 33 df channels
+on rohan (25 SSD + 8 HDD per-node mounts).
+
+This collector replaces that fanout with a single bash invocation that
+parallelizes the sub-commands inside the remote shell and serializes the
+output back through one channel. Wall time stays close to the slowest
+sub-command (typically the multi-path df, ~300 ms warm).
+"""
+from __future__ import annotations
+
+import shlex
+from dataclasses import dataclass
+
+from ..exec import Executor
+
+
+# Printable-ASCII sentinels — readable in logs and unlikely to clash with
+# any output from the wrapped commands.
+SECTION_DELIM = "===ROHANBOARD_SECTION:"
+SECTION_END = "===ROHANBOARD_SECTION_END==="
+
+
+@dataclass
+class CombinedRaw:
+    """Raw text per collector, indexed by section name. Empty string when
+    the sub-command failed or produced no output (callers handle that the
+    same as 'no data this tick')."""
+    mounts: str = ""
+    quota: str = ""
+    df: str = ""
+    squeue: str = ""
+    sacct: str = ""
+    nodes: str = ""
+
+
+# Section key → list of shell command strings to run in the remote bash.
+# Each value is a SHELL FRAGMENT, not an argv list — callers are
+# responsible for `shlex.quote`ing per-arg as needed. df globs (e.g.
+# `/cluster/*`) MUST be left unquoted so the remote shell expands them.
+SectionMap = dict[str, str]
+
+
+def build_script(sections: SectionMap) -> str:
+    """Build the bash script that runs every section in parallel + emits
+    sectioned output. Pure function — no I/O. Tested in isolation."""
+    parallel_lines = []
+    dump_lines = []
+    for name in sections:
+        # Each sub-shell writes to a tempfile; stderr is dropped (we only
+        # care about stdout for parsing). `|| true` keeps `wait` from
+        # seeing a nonzero exit code from any one sub-command — we want
+        # all sections collected even if some failed.
+        parallel_lines.append(
+            f'( {sections[name]} > "$T/{name}" 2>/dev/null || true ) &'
+        )
+        dump_lines.append(
+            f'echo "{SECTION_DELIM}{name}"; '
+            f'cat "$T/{name}" 2>/dev/null || true; '
+            f'echo "{SECTION_END}"'
+        )
+    return (
+        "set -u\n"
+        "T=$(mktemp -d -t rohanboard.XXXXXX)\n"
+        "trap 'rm -rf \"$T\"' EXIT\n"
+        "\n"
+        + "\n".join(parallel_lines)
+        + "\nwait\n\n"
+        + "\n".join(dump_lines)
+        + "\n"
+    )
+
+
+def parse_combined(text: str) -> CombinedRaw:
+    """Split multi-section output into per-section text.
+
+    Tolerates missing sentinels (returns whatever was collected up to
+    that point). Strips the trailing newline injected by `echo`."""
+    sections: dict[str, list[str]] = {}
+    current_key: str | None = None
+    current_lines: list[str] = []
+    for line in text.splitlines():
+        if line.startswith(SECTION_DELIM):
+            if current_key is not None:
+                sections[current_key] = current_lines
+            current_key = line[len(SECTION_DELIM):].strip()
+            current_lines = []
+        elif line == SECTION_END:
+            if current_key is not None:
+                sections[current_key] = current_lines
+                current_key = None
+                current_lines = []
+        elif current_key is not None:
+            current_lines.append(line)
+    if current_key is not None:
+        sections[current_key] = current_lines
+    return CombinedRaw(
+        mounts="\n".join(sections.get("mounts", [])),
+        quota="\n".join(sections.get("quota", [])),
+        df="\n".join(sections.get("df", [])),
+        squeue="\n".join(sections.get("squeue", [])),
+        sacct="\n".join(sections.get("sacct", [])),
+        nodes="\n".join(sections.get("nodes", [])),
+    )
+
+
+async def fetch_combined(
+    executor: Executor,
+    *,
+    quota_user: str | None,
+    df_explicit_paths: list[str],
+    df_prefix_globs: list[str],
+    squeue_format: str,
+    squeue_users: list[str] | None,
+    sacct_format: str,
+    sacct_starttime: str,
+    sacct_users: list[str] | None,
+    timeout: float = 25.0,
+) -> CombinedRaw:
+    """Run the combined script in one ssh channel and parse the result.
+
+    Sub-commands skipped when their config knob is empty — e.g. no
+    `quota_user` → quota section is empty. Failures inside individual
+    sub-commands are absorbed (`|| true` in the script + empty section
+    returned), so a single broken command doesn't fail the whole tick.
+    """
+    sections: SectionMap = {
+        "mounts": "cat /proc/mounts",
+        "nodes": "scontrol show node --all",
+    }
+    if quota_user:
+        sections["quota"] = f"quota -u {shlex.quote(quota_user)}"
+    # df accepts a mix of explicit paths and shell globs; the remote
+    # bash expands the globs. Quote explicit paths to handle spaces;
+    # globs are left raw.
+    df_args = [shlex.quote(p) for p in df_explicit_paths] + list(df_prefix_globs)
+    if df_args:
+        sections["df"] = f"df -B1 {' '.join(df_args)}"
+    # squeue / sacct: optional user filter — same logic as the existing
+    # fetch_jobs / fetch_recent_jobs (callers resolve "self" → $USER).
+    squeue_argv = ["squeue", "-h", "-O", squeue_format]
+    if squeue_users:
+        squeue_argv += ["-u", ",".join(squeue_users)]
+    sections["squeue"] = " ".join(shlex.quote(a) for a in squeue_argv)
+
+    sacct_argv = [
+        "sacct", "-X", "-P", "-n",
+        f"--starttime={sacct_starttime}",
+        "-o", sacct_format,
+    ]
+    if sacct_users:
+        sacct_argv += ["-u", ",".join(sacct_users)]
+    else:
+        sacct_argv += ["-a"]
+    sections["sacct"] = " ".join(shlex.quote(a) for a in sacct_argv)
+
+    script = build_script(sections)
+    rc, stdout, stderr = await executor.run(["bash", "-c", script], timeout=timeout)
+    if rc != 0:
+        # `set -u` fires on undefined vars; otherwise rc==0 because every
+        # sub-command is `|| true`. A nonzero rc means the wrapper script
+        # itself failed (e.g. mktemp on a full /tmp).
+        raise RuntimeError(
+            f"combined collector failed rc={rc}: stderr={stderr[:200]!r}"
+        )
+    return parse_combined(stdout)

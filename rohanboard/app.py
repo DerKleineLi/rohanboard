@@ -15,6 +15,7 @@ from textual.widgets import Footer, Header, Static, TabbedContent, TabPane
 from collections import deque
 
 from .collectors import slurm, storage
+from .collectors.combined import fetch_combined
 from .collectors.models import Snapshot, StorageEntry, UtilizationSample
 from .config import Config, load as load_config
 from .exec import Executor
@@ -208,74 +209,115 @@ class RohanBoardApp(App):
 
         users_for_fetch = ["self"] if self.mine_only else ["all"]
 
-        async def grab_jobs():
-            try:
-                with perf_block("collect", "jobs"):
-                    snap.jobs = await slurm.fetch_jobs(self.executor, users_for_fetch)
-            except Exception as e:
-                snap.errors["jobs"] = str(e)
+        # Build the per-tick collector inputs from cfg.storage_entries.
+        # Multiple kind=quota entries: only the first is realized — the
+        # combined collector runs ONE quota probe per tick. (Multi-quota
+        # configs are rare; if needed, route extras as kind=df and parse
+        # them separately.) df paths/globs are concatenated into one
+        # `df -B1` invocation.
+        quota_user: str | None = None
+        quota_label: str | None = None
+        quota_filesystem: str | None = None
+        df_explicit: list[tuple[str, str]] = []   # (label, path) for kind=df
+        df_globs: list[str] = []                   # shell globs for kind=auto
+        for entry_cfg in self.cfg.storage_entries:
+            if entry_cfg.kind == "quota":
+                if quota_user is None:
+                    import os as _os
+                    quota_user = _os.environ.get("USER", "") or None
+                    quota_label = entry_cfg.label
+                    quota_filesystem = entry_cfg.filesystem
+            elif entry_cfg.kind == "df" and entry_cfg.path:
+                df_explicit.append((entry_cfg.label, entry_cfg.path))
+            elif entry_cfg.kind == "auto":
+                prefixes = entry_cfg.prefixes or ["/cluster", "/cluster_HDD"]
+                # Glob each prefix so the remote shell expands to all
+                # autofs-visible children (df then triggers cold mounts
+                # as it accesses each).
+                df_globs.extend(p.rstrip("/") + "/*" for p in prefixes)
 
-        async def grab_recent():
-            try:
-                with perf_block("collect", "recent"):
-                    snap.recent_jobs = await slurm.fetch_recent_jobs(self.executor, users_for_fetch)
-            except Exception as e:
-                snap.errors["recent_jobs"] = str(e)
+        squeue_users_resolved: list[str] | None = None
+        sacct_users_resolved: list[str] | None = None
+        if users_for_fetch and "all" not in users_for_fetch:
+            import os as _os
+            resolved = [
+                _os.environ.get("USER", "") if u == "self" else u
+                for u in users_for_fetch
+            ]
+            resolved = [u for u in resolved if u]
+            if resolved:
+                squeue_users_resolved = resolved
+                sacct_users_resolved = resolved
 
-        async def grab_nodes():
-            try:
-                with perf_block("collect", "nodes"):
-                    nodes = await slurm.fetch_nodes(self.executor)
-                if self.cfg.slurm.include_partitions:
-                    inc = set(self.cfg.slurm.include_partitions)
-                    nodes = [n for n in nodes if any(p in inc for p in n.partitions)]
-                if self.cfg.slurm.exclude_partitions:
-                    exc = set(self.cfg.slurm.exclude_partitions)
-                    nodes = [n for n in nodes if not any(p in exc for p in n.partitions)]
-                snap.nodes = nodes
-            except Exception as e:
-                snap.errors["nodes"] = str(e)
+        # ── one ssh channel per tick — see collectors/combined.py ──
+        try:
+            with perf_block("collect", "combined"):
+                raw = await fetch_combined(
+                    self.executor,
+                    quota_user=quota_user,
+                    df_explicit_paths=[p for _l, p in df_explicit],
+                    df_prefix_globs=df_globs,
+                    squeue_format=slurm.SQUEUE_O_FORMAT,
+                    squeue_users=squeue_users_resolved,
+                    sacct_format=slurm.SACCT_FORMAT,
+                    sacct_starttime="now-3days",
+                    sacct_users=sacct_users_resolved,
+                )
+        except Exception as e:
+            snap.errors["combined"] = str(e)
+            raw = None
 
-        async def grab_storage():
-            with perf_block("collect", "storage"):
-                await _grab_storage_impl()
-
-        async def _grab_storage_impl():
-            entries: list[StorageEntry] = []
-            for entry_cfg in self.cfg.storage_entries:
+        if raw is not None:
+            with perf_block("refresh", "parse"):
+                # squeue → jobs
                 try:
-                    if entry_cfg.kind == "quota":
-                        e = await storage.fetch_quota(self.executor, entry_cfg.label, entry_cfg.filesystem)
-                        if e is not None:
-                            entries.append(e)
-                    elif entry_cfg.kind == "df":
-                        if not entry_cfg.path:
-                            continue
-                        e = await storage.fetch_df(self.executor, entry_cfg.label, entry_cfg.path)
-                        if e is not None:
-                            entries.append(e)
-                    elif entry_cfg.kind == "auto":
-                        prefixes = entry_cfg.prefixes or ["/cluster", "/cluster_HDD"]
-                        # Route /proc/mounts read through the executor so this
-                        # works under exec = "ssh:<host>" (would otherwise read
-                        # the WSL mount table and find nothing under /cluster*).
-                        proc_mounts = await storage.fetch_proc_mounts(self.executor)
-                        discovered = storage.discover_mounts(proc_mounts, prefixes)
-                        # df all of them in parallel
-                        results = await asyncio.gather(
-                            *[storage.fetch_df(self.executor, label, path) for label, path in discovered],
-                            return_exceptions=True,
-                        )
-                        for r in results:
-                            if isinstance(r, StorageEntry):
-                                entries.append(r)
+                    snap.jobs = slurm.parse_squeue(raw.squeue)
                 except Exception as e:
-                    snap.errors[f"storage:{entry_cfg.label}"] = str(e)
-            snap.storage = entries
-
-        with perf_block("refresh", "gather",
-                         extra=f"jobs={len(snap.jobs)}"):
-            await asyncio.gather(grab_jobs(), grab_recent(), grab_nodes(), grab_storage())
+                    snap.errors["jobs"] = str(e)
+                # sacct → recent_jobs
+                try:
+                    recent = slurm.parse_sacct(raw.sacct)
+                    snap.recent_jobs = list(reversed(recent))[:50]
+                except Exception as e:
+                    snap.errors["recent_jobs"] = str(e)
+                # scontrol show node → nodes (with partition filters)
+                try:
+                    nodes = slurm.parse_scontrol_show_node(raw.nodes)
+                    if self.cfg.slurm.include_partitions:
+                        inc = set(self.cfg.slurm.include_partitions)
+                        nodes = [n for n in nodes if any(p in inc for p in n.partitions)]
+                    if self.cfg.slurm.exclude_partitions:
+                        exc = set(self.cfg.slurm.exclude_partitions)
+                        nodes = [n for n in nodes if not any(p in exc for p in n.partitions)]
+                    snap.nodes = nodes
+                except Exception as e:
+                    snap.errors["nodes"] = str(e)
+                # storage: quota + df-multi
+                entries: list[StorageEntry] = []
+                if quota_user and raw.quota.strip():
+                    try:
+                        q = storage.parse_quota(
+                            raw.quota,
+                            label=quota_label or "home",
+                            filesystem=quota_filesystem,
+                        )
+                        if q is not None:
+                            entries.append(q)
+                    except Exception as e:
+                        snap.errors[f"storage:{quota_label}"] = str(e)
+                if raw.df.strip():
+                    try:
+                        df_rows = storage.parse_df_multi(raw.df)
+                        # Apply explicit (label, path) overrides — kind=df
+                        # entries get their user-specified label.
+                        path_to_label = {p: l for l, p in df_explicit}
+                        for entry in df_rows:
+                            if entry.path in path_to_label:
+                                entry.label = path_to_label[entry.path]
+                            entries.append(entry)
+                    except Exception as e:
+                        snap.errors["storage:df"] = str(e)
+                snap.storage = entries
 
         # Append to rolling history (only if we got node data).
         if snap.nodes:

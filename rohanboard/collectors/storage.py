@@ -110,6 +110,45 @@ async def fetch_df(executor: Executor, label: str, path: str) -> StorageEntry | 
     return parse_df(out, label=label, path=path)
 
 
+def parse_df_multi(text: str) -> list[StorageEntry]:
+    """Parse multi-path `df -B1 <p1> <p2> ...` output. One row per path.
+
+    The "Mounted on" column (last field on each data line) is used as both
+    the entry's `path` and a default `label` — callers that want a custom
+    label must do their own (path → label) mapping after parsing.
+
+    Skips header line and any non-numeric rows (df may emit
+    "df: cannot access ...: No such file or directory" on stderr but
+    the caller is expected to redirect stderr away).
+    """
+    out: list[StorageEntry] = []
+    seen_paths: set[str] = set()
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    for line in lines[1:]:  # skip header
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        try:
+            total = int(parts[-5])
+            used = int(parts[-4])
+            avail = int(parts[-3])
+        except ValueError:
+            continue
+        path = parts[-1]
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        out.append(StorageEntry(
+            label=path,
+            used_bytes=used,
+            total_bytes=total,
+            avail_bytes=avail,
+            source="df",
+            path=path,
+        ))
+    return out
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Mount discovery (for kind="auto" storage entries)
 # ──────────────────────────────────────────────────────────────────────────
