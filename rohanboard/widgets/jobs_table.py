@@ -634,10 +634,12 @@ class JobsTable(Widget):
         else:
             pill.remove_class("-active")
         # Mine-only is applied server-side via `-u $USER` — flip the App
-        # flag and kick a fresh fetch.  No client-side re-filtering.
+        # flag and kick a fresh fetch. _refresh_all is @work-decorated on
+        # the App; calling it spawns the worker (and cancels any prior
+        # in-flight tick via exclusive=True, group="collect").
         try:
             self.app.mine_only = new                 # type: ignore[attr-defined]
-            self.run_worker(self.app._refresh_all(), exclusive=False)  # type: ignore[attr-defined]
+            self.app._refresh_all()                  # type: ignore[attr-defined]
         except Exception:
             pass
 

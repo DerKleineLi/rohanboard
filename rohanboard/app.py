@@ -5,7 +5,7 @@ import gc
 from pathlib import Path
 from typing import Callable
 
-from textual import events
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.containers import ScrollableContainer
 from textual.reactive import reactive
@@ -116,15 +116,20 @@ class RohanBoardApp(App):
 
     async def on_mount(self) -> None:
         self._apply_size_class(self.size.width)
-        await self._refresh_all()
+        # Kick off the first refresh as a worker (decorator-driven); UI
+        # paints the empty snapshot immediately and the first real tick
+        # writes self.snapshot when it lands.
+        self._refresh_all()
         # Use the slowest (storage) interval as the master tick; collectors
         # below it skip work via their own elapsed-since-last logic in v1
         # we just refresh everything on the shortest interval.
         interval = max(min(self.cfg.refresh.slurm_jobs, self.cfg.refresh.slurm_nodes,
                            self.cfg.refresh.storage), 1)
-        # run_worker(exclusive=True) — guards against overlapping ticks if a
-        # previous refresh is still draining.
-        self.set_interval(interval, self._refresh_all_bg)
+        # @work(exclusive=True, group="collect") on _refresh_all means
+        # each tick cancels any in-flight prior tick, regardless of how
+        # set_interval schedules them. The decorator returns a Worker
+        # object — set_interval calls the method and ignores the result.
+        self.set_interval(interval, self._refresh_all)
         # Freeze the GC generations for everything allocated during
         # startup (widget tree, caches, Styles back-references).  This
         # excludes them from future gen-2 scans, which were the root
@@ -142,9 +147,12 @@ class RohanBoardApp(App):
         except Exception:
             pass
 
-    async def action_refresh(self) -> None:
+    def action_refresh(self) -> None:
         self.notify("Refreshing…", timeout=1)
-        await self._refresh_all()
+        # _refresh_all is @work-decorated — calling it returns a Worker
+        # and the actual coroutine runs in the worker pool. The
+        # exclusive=True semantic cancels any in-flight tick first.
+        self._refresh_all()
 
     def action_show_tab(self, tab_id: str) -> None:
         self.query_one(TabbedContent).active = tab_id
@@ -201,9 +209,7 @@ class RohanBoardApp(App):
     # data
     # ────────────────────────────────────────────────────────────────────
 
-    def _refresh_all_bg(self) -> None:
-        self.run_worker(self._refresh_all(), exclusive=True, name="refresh_all")
-
+    @work(exclusive=True, group="collect", exit_on_error=False)
     async def _refresh_all(self) -> None:
         snap = Snapshot()
 
