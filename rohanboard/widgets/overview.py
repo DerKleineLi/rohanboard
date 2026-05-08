@@ -56,15 +56,31 @@ class HomeStorage(Widget):
         yield Static("[dim italic]loading…[/dim italic]", classes="usage", id="usage")
 
     def update_snapshot(self, snap: Snapshot) -> None:
-        home = next((e for e in snap.storage if e.source == "quota"), None)
+        # Resolve the "home" entry. Preference order:
+        #   1. label "home" (matches what the user wrote in TOML, regardless
+        #      of source — quota OR df)
+        #   2. any source=="quota" entry (legacy rohan default config)
+        #   3. first storage entry, if any
+        # The widget previously matched only `source == "quota"` and showed
+        # "no quota info yet" forever when the config used `kind = "df"`
+        # (the v2-Phase-4c default for ssh:rohan, which avoids depending on
+        # the `quota` binary on the remote).
+        home = next((e for e in snap.storage if e.label == "home"), None)
+        if home is None:
+            home = next((e for e in snap.storage if e.source == "quota"), None)
+        if home is None and snap.storage:
+            home = snap.storage[0]
         usage_line = self.query_one("#usage", Static)
         bar = self.query_one(UsageBar)
         if home is None:
-            usage_line.update("[dim italic]no quota info yet[/dim italic]")
+            usage_line.update("[dim italic]no storage info yet[/dim italic]")
             return
         bar.update_fraction(home.fraction)
         text = fat_bytes(home.free_bytes, home.used_bytes, home.total_bytes)
-        text.append("  (soft quota)", style="dim")
+        # Suffix only on quota entries — they have a soft/hard split that's
+        # worth surfacing. df entries just show free/used/total bytes.
+        if home.source == "quota":
+            text.append("  (soft quota)", style="dim")
         usage_line.update(text)
 
 
