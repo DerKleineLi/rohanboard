@@ -5,12 +5,15 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 if sys.version_info >= (3, 11):
     import tomllib  # type: ignore[import-not-found]
 else:
     import tomli as tomllib  # type: ignore[no-redef]
+
+if TYPE_CHECKING:
+    from .exec import Executor
 
 
 DEFAULT_CONFIG_PATH = Path(
@@ -75,6 +78,28 @@ class Config:
     theme: ThemeConfig = field(default_factory=ThemeConfig)
     overview: OverviewConfig = field(default_factory=OverviewConfig)
     presets: dict = field(default_factory=lambda: {"nodes": [], "jobs": []})
+    # Phase 4c: which Executor backs collectors.
+    #   "local"        → LocalExecutor (default; what 0612f58 baseline did)
+    #   "ssh:<host>"   → AsyncSSHExecutor(host=<host>) using ~/.ssh/config
+    # Anything else raises ValueError at parse time.
+    exec_spec: str = "local"
+
+    def build_executor(self) -> "Executor":
+        """Construct an Executor matching `exec_spec`. Lazy-imports
+        `rohanboard.exec` so config consumers that never need an Executor
+        (e.g. a config-validation script) don't pay the asyncssh import cost."""
+        from .exec import LocalExecutor, AsyncSSHExecutor
+        spec = self.exec_spec
+        if spec == "local":
+            return LocalExecutor()
+        if spec.startswith("ssh:"):
+            host = spec[len("ssh:"):].strip()
+            if not host:
+                raise ValueError(f"exec = 'ssh:' must include a host (e.g. 'ssh:rohan')")
+            return AsyncSSHExecutor(host=host)
+        raise ValueError(
+            f"unknown exec: {spec!r} (expected 'local' or 'ssh:<host>')"
+        )
 
 
 def _default_layout() -> LayoutConfig:
@@ -142,6 +167,21 @@ def load(path: Path | None = None) -> Config:
 
     if o := raw.get("overview"):
         cfg.overview = OverviewConfig(animation=str(o.get("animation", "art")))
+
+    # Phase 4c: top-level `exec` picks the Executor backend. We validate the
+    # shape here at load time so a malformed `exec = "garbage"` fails fast
+    # rather than at first run() call.  See `Config.build_executor`.
+    if "exec" in raw:
+        spec = str(raw["exec"])
+        if spec != "local" and not spec.startswith("ssh:"):
+            raise ValueError(
+                f"unknown exec: {spec!r} (expected 'local' or 'ssh:<host>')"
+            )
+        if spec.startswith("ssh:") and not spec[len("ssh:"):].strip():
+            raise ValueError(
+                f"exec = 'ssh:' must include a host (e.g. 'ssh:rohan')"
+            )
+        cfg.exec_spec = spec
 
     # Filter presets live in a separate JSON file for easy editing.
     from . import filter as _filter

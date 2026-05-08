@@ -18,6 +18,7 @@ instantiable; it lazily opens a persistent `SSHClientConnection` on first
 from __future__ import annotations
 
 import asyncio
+import shlex
 from typing import Protocol, Sequence, runtime_checkable
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -186,42 +187,56 @@ class AsyncSSHExecutor:
         if self._conn is None:
             await self.connect()
         assert self._conn is not None
-        # Build a single shell command from argv. asyncssh.run takes either
-        # a string (passed to remote shell) or list (joined). We pass a
-        # list so asyncssh's own quoting handles it.
-        # Wrap in asyncio.wait_for since asyncssh's own timeout doesn't
-        # always apply to all phases of session setup (asyncssh#411, #626).
-        # Cast away the `object` typing on _conn for the call site.
+        # Use create_process so we can explicitly close() the half-open
+        # session on cancel/timeout. `conn.run()` is a higher-level wrapper
+        # that doesn't expose the channel, so cleanup is implicit there.
+        # We want explicit control to mirror LocalExecutor's kill+shielded-wait
+        # pattern (feedback_asyncio_subprocess_cancel_leaks.md) — even though
+        # asyncssh's connection is persistent, an in-flight session that's
+        # been cancelled mid-execution can leave a remote process running
+        # until the connection is dropped.
+        #
+        # asyncssh's run/create_process take a STRING command (passed to the
+        # remote login shell), NOT an argv list. We shlex.join here so callers
+        # can keep the list-of-args interface that LocalExecutor uses. This
+        # quotes embedded whitespace/specials safely.
         conn = self._conn
+        process: object | None = None
+        cmd = shlex.join(argv)
         try:
-            result = await asyncio.wait_for(
-                conn.run(  # type: ignore[attr-defined]
-                    list(argv),
-                    check=False,
-                ),
+            process = await conn.create_process(cmd)  # type: ignore[attr-defined]
+            # Wrap the wait in asyncio.wait_for since asyncssh's own timeout
+            # doesn't always apply to all phases of session I/O
+            # (asyncssh#411, #626).
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),  # type: ignore[attr-defined]
                 timeout=timeout,
             )
+            rc = int(process.exit_status or 0)  # type: ignore[attr-defined]
         except BaseException:
-            # On cancel/timeout, the half-open SSH session needs cleaning
-            # but the parent connection is preserved for reuse. asyncssh
-            # cleans up the session when the awaitable is cancelled
-            # (PR for #626 landed pre-2.22). Nothing for us to do here
-            # beyond re-raising — but we still wrap in shield-style intent
-            # to be explicit about cancellation safety.
+            # TimeoutError, CancelledError, KeyboardInterrupt — clean up
+            # the half-open session before propagating. The parent
+            # connection (`self._conn`) is preserved for reuse.
+            if process is not None:
+                try:
+                    process.close()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                # Shield the wait so the cancellation that brought us here
+                # doesn't also cancel the cleanup. asyncssh's process.wait()
+                # is the analogue of subprocess.wait().
+                try:
+                    await asyncio.shield(process.wait_closed())  # type: ignore[attr-defined]
+                except BaseException:
+                    pass
             raise
-        # asyncssh's CompletedProcess: .exit_status, .stdout, .stderr.
-        # stdout/stderr are str by default (encoding="utf-8"), bytes if
-        # encoding=None. We don't override, so str.
-        rc = int(getattr(result, "exit_status", 0) or 0)
-        stdout = getattr(result, "stdout", "") or ""
-        stderr = getattr(result, "stderr", "") or ""
         # Some asyncssh versions return bytes when channel I/O was binary;
         # normalize defensively.
         if isinstance(stdout, bytes):
             stdout = stdout.decode("utf-8", errors="replace")
         if isinstance(stderr, bytes):
             stderr = stderr.decode("utf-8", errors="replace")
-        return rc, stdout, stderr
+        return rc, stdout or "", stderr or ""
 
     async def aclose(self) -> None:
         conn = self._conn

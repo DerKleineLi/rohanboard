@@ -17,7 +17,7 @@ from collections import deque
 from .collectors import slurm, storage
 from .collectors.models import Snapshot, StorageEntry, UtilizationSample
 from .config import Config, load as load_config
-from .exec import Executor, LocalExecutor
+from .exec import Executor
 from .perf import perf_block, perf_enabled, perf_log
 from .widgets.jobs_table import JobsTable
 from .widgets.nodes_table import NodesSummary, NodesTable
@@ -55,11 +55,15 @@ class RohanBoardApp(App):
         # The "Mine only" pill in the Jobs tab flips this and triggers a
         # fresh fetch — no need for client-side filtering.
         self.mine_only: bool = True
-        # Phase 4b: collectors take an Executor.  Single-cluster (= local
-        # box, since `0612f58` ran sluum/df directly on rohan via the user
-        # being logged in there) gets a LocalExecutor.  Phase 4c+ swap this
-        # for a per-cluster mapping.
-        self.executor: Executor = LocalExecutor()
+        # Phase 4c: collectors take an Executor.  Picker is config-driven:
+        #   exec = "local"      → LocalExecutor (default)
+        #   exec = "ssh:<host>" → AsyncSSHExecutor(host=<host>) — uses
+        #                          ~/.ssh/config for resolution.
+        # Lazy-connect on first run() (cold-handshake hits during initial
+        # _refresh_all on mount; the spinner / "loading…" state covers it).
+        # `on_unmount` calls aclose() — works for both Local (no-op) and
+        # AsyncSSH (closes the persistent connection).
+        self.executor: Executor = self.cfg.build_executor()
         # Widget factories can reference per-widget config (e.g. filter presets).
         node_presets = self.cfg.presets.get("nodes", [])
         job_presets = self.cfg.presets.get("jobs", [])

@@ -228,3 +228,83 @@ async def test_async_ssh_executor_aclose_no_connect_is_noop():
     await ex.aclose()
     await ex.aclose()  # idempotent
     assert ex._conn is None
+
+
+async def test_async_ssh_executor_run_cancellation_cleans_session():
+    """Cancellation mid-`run()` must close the half-open SSH session and
+    re-raise — without leaking the asyncssh process. Connection itself is
+    preserved for the next call.
+
+    Uses a stub `_conn` that hands out fake processes so we don't need a
+    live ssh target. Real cancellation cascade still goes through the
+    BaseException handler in AsyncSSHExecutor.run.
+    """
+    closed_processes: list[object] = []
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.exit_status: int | None = None
+            self._closed = False
+
+        async def communicate(self):  # noqa: D401
+            # Block long enough that the cancel arrives mid-await.
+            await asyncio.sleep(60)
+            return ("never", "")
+
+        def close(self) -> None:
+            self._closed = True
+            closed_processes.append(self)
+
+        async def wait_closed(self) -> None:
+            return None
+
+    class _FakeConn:
+        async def create_process(self, _argv):
+            return _FakeProcess()
+
+    ex = AsyncSSHExecutor(host="example.invalid")
+    ex._conn = _FakeConn()  # bypass connect()
+
+    task = asyncio.create_task(ex.run(["echo", "x"], timeout=120))
+    # Let create_process resolve and communicate() start awaiting.
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The half-open session must have been closed by the BaseException
+    # handler in AsyncSSHExecutor.run.
+    assert len(closed_processes) == 1
+    assert closed_processes[0]._closed is True
+    # Parent connection preserved for reuse — only the session was torn down.
+    assert ex._conn is not None
+
+
+async def test_async_ssh_executor_run_timeout_cleans_session():
+    """Same shape as cancellation, but the trigger is wait_for's
+    TimeoutError. Both go through the BaseException branch."""
+    closed_processes: list[object] = []
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.exit_status: int | None = None
+
+        async def communicate(self):
+            await asyncio.sleep(60)
+            return ("never", "")
+
+        def close(self) -> None:
+            closed_processes.append(self)
+
+        async def wait_closed(self) -> None:
+            return None
+
+    class _FakeConn:
+        async def create_process(self, _argv):
+            return _FakeProcess()
+
+    ex = AsyncSSHExecutor(host="example.invalid")
+    ex._conn = _FakeConn()
+    with pytest.raises(asyncio.TimeoutError):
+        await ex.run(["sleep", "60"], timeout=0.1)
+    assert len(closed_processes) == 1
+    assert ex._conn is not None  # parent connection preserved
