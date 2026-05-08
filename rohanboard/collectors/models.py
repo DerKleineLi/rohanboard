@@ -6,14 +6,33 @@ from datetime import datetime
 
 @dataclass(frozen=True)
 class GpuSpec:
-    """A single GPU entry from a node's Gres list, e.g. rtx_a6000 x 8."""
-    kind: str       # e.g. "rtx_a6000", "a100", "gtx_1080"
+    """A single GPU entry from a node's Gres list, e.g. rtx_a6000 x 8.
+
+    `kind` may be empty when Gres reports only `gpu:N(S:...)` (LRZ shape).
+    `vram` is filled in when `AvailableFeatures` carries a `KIND-NNGB` shape
+    (LRZ); rohan's classic Gres has the kind but no VRAM, so `vram` is None
+    there. The combined display is "<kind> <vram>" with graceful "—"
+    fallback when both are missing.
+    """
+    kind: str       # e.g. "rtx_a6000", "a100", "H100", or "" for kind-less Gres
     total: int
     alloc: int = 0
+    vram: str | None = None    # e.g. "92GB", "80GB"; None when not parseable
 
     @property
     def free(self) -> int:
         return max(self.total - self.alloc, 0)
+
+    @property
+    def display(self) -> str:
+        """Human-readable label for the GPU column: '<kind> <vram>' or '—'."""
+        if self.kind and self.vram:
+            return f"{self.kind} {self.vram}"
+        if self.kind:
+            return self.kind
+        if self.vram:
+            return self.vram
+        return "—"
 
 
 @dataclass
