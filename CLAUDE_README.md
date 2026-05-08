@@ -57,6 +57,7 @@ After respawn, capture-pane after ~10 s to confirm: cluster name in header, Stor
 
 ## Known gotchas
 
+- **`kind = "quota"` requires `exec = "ssh:rohan"` (login node)** — the `quota` binary is NOT installed on slurm/compute nodes, so a slurm-targeted ssh exec would silently fall back to "no quota info yet". Whenever a config carries a `[[storage.entries]]` with `kind = "quota"`, the `exec` MUST point at a host that has the `quota` binary. For rohan that's the login node alias `rohan`.
 - **Filter Input id is `"filter"`, not `"filter-input"`** — both `JobsTable` and `NodesTable` mount their filter Input with `id="filter"`. Test code that does `pilot.click("#filter-input")` will silently fail. Query within the active widget: `app.query_one(JobsTable).query_one("#filter", Input)`.
 - **`l` is bound to `action_jobs_tail_log` on the Jobs tab** (scoped via `App.check_action`). Test strings containing `q`/`r`/`l` are unsafe if focus drifts off the filter Input. Test string `testhello` contains `l` — Pilot keeps focus stable so it's fine in-process, but be cautious in tmux real-terminal tests.
 - **`watch_filter_text` is now a no-op** — debounce in `on_input_changed` drives the rebuild via `run_worker(_apply_filter_async, exclusive=True)`. The reactive write still fires the watcher, but the watcher does nothing; do NOT re-add a synchronous rebuild there.
