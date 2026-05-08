@@ -15,7 +15,24 @@ This file is the project-local runbook for `rohanboard` on `clean-reimpl-v2`. Re
 - **Phase 4b** (24efb4c): Executor abstraction + AsyncSSHExecutor stub.
 - **Phase 4c** (in WIP, checkpointed at c1fe302): single-cluster SSH wiring (LocalExecutor + AsyncSSHExecutor live; collectors use them via `cfg.build_executor()`). The user has been smoke-testing in `rohan:rb-v2-4c-ssh` against `/tmp/wsl_single_v2_4c_ssh_config.toml` (`exec = "ssh:rohan"`).
 - **Phase 4d** (landed 2026-05-08, e312974 + Phase 4d-tests): chunked async DataTable rebuild (`_apply_filter_async` with `await asyncio.sleep(0)` every 50 row mutations) + 150 ms filter debounce on both `JobsTable` and `NodesTable`. Cherry-picked from `clean-reimpl` `e7c17b4`. Fixes the per-keystroke synchronous full-table rebuild that starved Textual's input dispatch under refresh-tick pressure (root cause of the persistent filter-bar character drops at slow rhythm).
+- **Phase 4d.1 + layout-defaults** (landed 2026-05-08, 8f88cce → afdf878): six commits bringing rohan-style polish from `main` over the 4d input-drop fix:
+  - `8f88cce` foundational `GpuSpec.vram` + `display` (extracted from main 800459d).
+  - `d27cff8` cherry-pick of `a5f2f26` — GPU cell renders `<free/alloc/total>` first, then `<kind+vram>` label.
+  - `5c0109f` rohan-style layout becomes the app default; `[layout]` is now optional in TOML configs.
+  - `c6d530e` cherry-pick of `4cde47a` — MIG-node aggregation at node level (no fictitious negative free counts).
+  - `54377ef` cherry-pick of `9f17161` — `_norm_kind` canonical formatter (uppercases non-MIG kinds, preserves MIG profiles).
+  - `afdf878` cherry-pick of `3ee48b0` — static VRAM fallback `_KIND_VRAM_FALLBACK` for clusters without hyphenated `AvailableFeatures`.
 - **Phase 4e+** (not yet started): multi-cluster SSH wiring.
+
+## Layout defaults
+
+`[layout]` is optional in cluster TOML configs (since 5c0109f). Omit it to get the rohan-style default:
+- Overview → `overview_panel` (responsive 1- or 2-col composition).
+- Jobs → `jobs_table`.
+- Nodes → `nodes_summary` above `nodes_table`.
+- Storage → `storage_panel`.
+
+Cluster-specific TOMLs (e.g. `/tmp/wsl_single_v2_4c_ssh_config.toml`) carry only cluster-specific knobs (ssh entry, storage paths). Override `[layout]` only when a cluster has unusual UI needs.
 
 ## Smoke-test pane
 
