@@ -117,12 +117,17 @@ def parse_df_multi(text: str) -> list[StorageEntry]:
     the entry's `path` and a default `label` — callers that want a custom
     label must do their own (path → label) mapping after parsing.
 
+    Dedupe semantic matches `discover_mounts` (source-keyed): two paths
+    that resolve to the same backing filesystem (autofs case-aliases like
+    `/cluster/daidalos` vs `/cluster/daidaloS`) collapse to one entry —
+    otherwise SSD totals double-count the same physical storage.
+
     Skips header line and any non-numeric rows (df may emit
     "df: cannot access ...: No such file or directory" on stderr but
     the caller is expected to redirect stderr away).
     """
     out: list[StorageEntry] = []
-    seen_paths: set[str] = set()
+    seen_sources: set[str] = set()
     lines = [ln for ln in text.splitlines() if ln.strip()]
     for line in lines[1:]:  # skip header
         parts = line.split()
@@ -134,10 +139,11 @@ def parse_df_multi(text: str) -> list[StorageEntry]:
             avail = int(parts[-3])
         except ValueError:
             continue
+        source = parts[0]   # Filesystem column — host:/local etc.
         path = parts[-1]
-        if path in seen_paths:
+        if source in seen_sources:
             continue
-        seen_paths.add(path)
+        seen_sources.add(source)
         out.append(StorageEntry(
             label=path,
             used_bytes=used,

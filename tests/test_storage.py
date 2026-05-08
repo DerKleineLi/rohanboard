@@ -81,6 +81,33 @@ def test_discover_mounts_empty_text_returns_empty():
     assert discover_mounts("", prefixes=["/cluster"]) == []
 
 
+def test_parse_df_multi_dedupes_case_aliased_autofs_mounts():
+    """rohan's autofs exposes some nodes via case-aliased paths
+    (`/cluster/daidalos` and `/cluster/daidaloS` both NFS-mounted from
+    `daidalos.vc.in.tum.de:/local`). df reports BOTH paths as separate
+    rows with the same Filesystem column. parse_df_multi must dedupe
+    by source — otherwise the SSD total double-counts the underlying
+    storage.
+    """
+    from rohanboard.collectors.storage import parse_df_multi
+    text = (
+        "Filesystem                       1B-blocks            Used      Available Use% Mounted on\n"
+        "balar.vc.in.tum.de:/local     46100612972544  39907700609024   4623127347200  90% /cluster/balar\n"
+        "daidalos.vc.in.tum.de:/local  38682537619456  35986325577728    721922187264  99% /cluster/daidalos\n"
+        "daidalos.vc.in.tum.de:/local  38682537619456  35986325577728    721922187264  99% /cluster/daidaloS\n"
+    )
+    entries = parse_df_multi(text)
+    assert len(entries) == 2, (
+        f"daidalos/daidaloS must dedupe to one entry, got {len(entries)}: "
+        f"{[e.path for e in entries]}"
+    )
+    paths = [e.path for e in entries]
+    assert "/cluster/balar" in paths
+    # First-seen wins; daidalos appears before daidaloS in df output.
+    assert "/cluster/daidalos" in paths
+    assert "/cluster/daidaloS" not in paths
+
+
 def test_discover_mounts_skips_uninteresting_fstypes():
     text = (
         "tmpfs /run tmpfs rw 0 0\n"
