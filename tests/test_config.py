@@ -88,3 +88,40 @@ def test_build_executor_rejects_empty_ssh_host_in_code():
     cfg = Config(exec_spec="ssh:")
     with pytest.raises(ValueError, match="must include a host"):
         cfg.build_executor()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Default layout — rohan-style is the app default; [layout] is optional
+# ──────────────────────────────────────────────────────────────────────────
+
+def test_config_with_no_layout_section_uses_rohan_style_default(tmp_path):
+    """A config file that omits [layout] should land the rohan-style
+    default — Overview uses overview_panel, Nodes shows the totals
+    summary above the per-node table.
+
+    Lets cluster-specific TOML files focus on cluster-specific knobs
+    (ssh, storage paths, GPU naming) without re-declaring the layout.
+    """
+    cfg = load(_write(tmp_path, 'exec = "ssh:rohan"\n'))
+    tabs = {t.id: t for t in cfg.layout.tabs}
+    assert "overview" in tabs
+    assert tabs["overview"].widgets == ["overview_panel"]
+    assert "nodes" in tabs
+    assert tabs["nodes"].widgets == ["nodes_summary", "nodes_table"], (
+        "Nodes tab default must surface cluster totals above the table"
+    )
+    assert "jobs" in tabs and "jobs_table" in tabs["jobs"].widgets
+    assert "storage" in tabs and "storage_panel" in tabs["storage"].widgets
+
+
+def test_config_with_explicit_layout_overrides_default(tmp_path):
+    """An explicit [layout] section still overrides the rohan default."""
+    body = """
+[[layout.tabs]]
+id = "jobs"
+title = "Jobs"
+widgets = ["jobs_table"]
+"""
+    cfg = load(_write(tmp_path, body))
+    assert len(cfg.layout.tabs) == 1
+    assert cfg.layout.tabs[0].id == "jobs"

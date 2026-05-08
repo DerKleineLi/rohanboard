@@ -36,34 +36,22 @@ prefixes = ["/cluster", "/cluster_HDD"]
 # kind  = "df"
 # path  = "/cluster/balar"
 
-[layout]
-# Tab order + which widgets appear on each tab.
-# Widget IDs:
+# [layout] is OPTIONAL. Omit it to get the rohan-style default:
+#   Overview → overview_panel (responsive 1- or 2-col composition)
+#   Jobs     → jobs_table
+#   Nodes    → nodes_summary above nodes_table
+#   Storage  → storage_panel
+# Override only when the cluster has unusual UI needs.
+#
+# Available widget IDs:
 #   overview_panel, storage_panel, jobs_table, nodes_table, nodes_summary,
 #   utilization_panel, home_storage, compact_jobs, ascii_art.
 #
-# `overview_panel` composes the cluster-totals + home + jobs + utilization
-# + decoration layout automatically and is the recommended single widget
-# for the Overview tab.
-[[layout.tabs]]
-id = "overview"
-title = "Overview"
-widgets = ["overview_panel"]
-
-[[layout.tabs]]
-id = "jobs"
-title = "Jobs"
-widgets = ["jobs_table"]
-
-[[layout.tabs]]
-id = "nodes"
-title = "Nodes"
-widgets = ["nodes_summary", "nodes_table"]
-
-[[layout.tabs]]
-id = "storage"
-title = "Storage"
-widgets = ["storage_panel"]
+# Example override (custom Overview widget set):
+# [[layout.tabs]]
+# id = "overview"
+# title = "Overview"
+# widgets = ["home_storage", "compact_jobs", "ascii_art"]
 
 [theme]
 # Path is relative to rohanboard/styles/, or absolute.

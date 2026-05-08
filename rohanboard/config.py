@@ -103,10 +103,22 @@ class Config:
 
 
 def _default_layout() -> LayoutConfig:
+    """Rohan-style default layout — used when a config file omits [layout].
+
+    Overview tab uses the responsive `overview_panel` widget (which itself
+    composes home_storage / nodes_summary / utilization / ascii_art into a
+    1- or 2-col layout depending on terminal width). Nodes tab puts the
+    cluster totals card above the per-node table so the GPU pool is
+    visible while scanning rows.
+
+    Override only when the cluster has unusual UI needs (e.g. an LRZ-only
+    config might want a custom widget set on Storage). Most clusters
+    should not need a [layout] section at all.
+    """
     return LayoutConfig(tabs=[
-        TabConfig(id="overview", title="Overview", widgets=["storage_panel", "jobs_table", "nodes_summary"]),
+        TabConfig(id="overview", title="Overview", widgets=["overview_panel"]),
         TabConfig(id="jobs",     title="Jobs",     widgets=["jobs_table"]),
-        TabConfig(id="nodes",    title="Nodes",    widgets=["nodes_table"]),
+        TabConfig(id="nodes",    title="Nodes",    widgets=["nodes_summary", "nodes_table"]),
         TabConfig(id="storage",  title="Storage",  widgets=["storage_panel"]),
     ])
 
