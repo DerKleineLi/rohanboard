@@ -628,7 +628,11 @@ class NodesTable(Widget):
             "partitions": Text(", ".join(bases) if bases else "—"),
         }
 
-    def update_snapshot(self, snapshot: Snapshot) -> None:
+    async def update_snapshot(self, snapshot: Snapshot) -> None:
+        """Async + chunked rebuild — yields the event loop every 50 row
+        mutations so input dispatch isn't held during a refresh tick.
+        Mirrors the JobsTable pattern; same risk class (large tables ×
+        per-row update_cell × N columns)."""
         self._last_snapshot = snapshot
         table = self.query_one("#nodes_dt", DataTable)
         prev_scroll_x = table.scroll_x
@@ -664,6 +668,7 @@ class NodesTable(Widget):
             self._applied_sort = current_sort
 
         new_keys: set[str] = set()
+        mut_count = 0
         for n in nodes:
             row = self._row_for_node(n, storage_map)
             new_keys.add(n.name)
@@ -678,6 +683,9 @@ class NodesTable(Widget):
                 values = [row[k] for k, _l, _w, _s in _NODE_COLUMNS]
                 rk = table.add_row(*values, key=n.name)
                 self._row_keys[n.name] = rk
+            mut_count += 1
+            if mut_count % 50 == 0:
+                await asyncio.sleep(0)
 
         for stale in list(self._row_keys.keys() - new_keys):
             try:
@@ -685,6 +693,9 @@ class NodesTable(Widget):
             except Exception:
                 pass
             del self._row_keys[stale]
+            mut_count += 1
+            if mut_count % 50 == 0:
+                await asyncio.sleep(0)
 
         if not nodes:
             n_cols = len(_NODE_COLUMNS)

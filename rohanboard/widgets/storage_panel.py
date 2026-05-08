@@ -1,6 +1,8 @@
 """Storage view: home / SSD / HDD groups, green bars showing free space, responsive."""
 from __future__ import annotations
 
+import asyncio
+
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Grid, Vertical
@@ -175,7 +177,13 @@ class StorageGroup(Widget):
         yield Static(_GROUP_TITLES.get(self.group_id, self.group_id.title()), classes="group_title")
         yield Grid(classes="grid", id="grid")
 
-    def update_entries(self, entries: list[StorageEntry]) -> None:
+    async def update_entries(self, entries: list[StorageEntry]) -> None:
+        """Async + chunked: yields the loop every 25 mounts so the
+        first-paint of an `auto`-discovered cluster (33+ bars on rohan)
+        doesn't hold input dispatch for the duration of the mount loop.
+        Each grid.mount triggers a layout pass — the per-call cost is
+        non-trivial, so the chunk threshold is half of the table-row
+        50-mutation pattern."""
         grid = self.query_one("#grid", Grid)
         # Adapt grid columns to current viewport: ~50 cols per bar.
         try:
@@ -187,6 +195,7 @@ class StorageGroup(Widget):
             grid.styles.grid_size_columns = cols
 
         new_labels = {e.label for e in entries}
+        mut_count = 0
         for entry in entries:
             if entry.label in self._bars:
                 self._bars[entry.label].update_entry(entry)
@@ -194,12 +203,18 @@ class StorageGroup(Widget):
                 bar = StorageBar(entry)
                 self._bars[entry.label] = bar
                 grid.mount(bar)
+            mut_count += 1
+            if mut_count % 25 == 0:
+                await asyncio.sleep(0)
         for stale in list(self._bars.keys() - new_labels):
             try:
                 self._bars[stale].remove()
             except Exception:
                 pass
             del self._bars[stale]
+            mut_count += 1
+            if mut_count % 25 == 0:
+                await asyncio.sleep(0)
         self.display = bool(self._bars)
 
 
@@ -240,12 +255,14 @@ class StoragePanel(Widget):
             yield group
         yield Static("[dim italic]no storage data yet[/dim italic]", classes="empty", id="empty_msg")
 
-    def update_snapshot(self, snapshot: Snapshot) -> None:
+    async def update_snapshot(self, snapshot: Snapshot) -> None:
+        """Async — awaits each StorageGroup's chunked rebuild so the loop
+        yields between groups (Home → SSD → HDD → Other)."""
         empty_msg = self.query_one("#empty_msg", Static)
         if not snapshot.storage:
             empty_msg.display = True
             for gid in self.GROUP_ORDER:
-                self.query_one(f"#group_{gid}", StorageGroup).update_entries([])
+                await self.query_one(f"#group_{gid}", StorageGroup).update_entries([])
             return
         empty_msg.display = False
         grouped: dict[str, list[StorageEntry]] = {gid: [] for gid in self.GROUP_ORDER}
@@ -253,4 +270,4 @@ class StoragePanel(Widget):
             grouped[_classify(entry)].append(entry)
         for gid, entries in grouped.items():
             entries.sort(key=lambda e: e.label.lower())
-            self.query_one(f"#group_{gid}", StorageGroup).update_entries(entries)
+            await self.query_one(f"#group_{gid}", StorageGroup).update_entries(entries)

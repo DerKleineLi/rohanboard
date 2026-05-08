@@ -104,3 +104,90 @@ async def test_jobs_filter_no_drops_at_50ms_rhythm():
     app = RohanBoardApp(config=_minimal_config())
     async with app.run_test() as pilot:
         await _type_and_assert(app, pilot, JobsTable, "testhello", gap_s=0.05)
+
+
+async def test_input_during_active_refresh_tick_no_drops():
+    """Phase 4d.1.X: with the @work-decorated tick + chunked
+    update_snapshot in every heavy widget, typing into the filter
+    while a fat refresh broadcast is running must not drop chars.
+
+    Synthesizes a large snapshot (200 jobs + 100 nodes + 50 storage
+    entries), writes `app.snapshot = snap` directly to fan out, then
+    immediately types into the filter at 600ms rhythm. The broadcast
+    worker is still running when the first keystrokes arrive — the
+    test pins that they all land in the Input regardless.
+    """
+    from datetime import datetime
+    from rohanboard.collectors.models import (
+        Job, Node, GpuSpec, Snapshot, StorageEntry,
+    )
+
+    app = RohanBoardApp(config=_minimal_config())
+    async with app.run_test() as pilot:
+        # Switch to Jobs tab first so the filter Input is mounted.
+        tabbed = app.query_one(TabbedContent)
+        tabbed.active = "jobs"
+        await pilot.pause()
+
+        # Build a fat synthetic snapshot — 200 jobs is well past the
+        # 50-row chunk threshold so we KNOW the rebuild has to yield.
+        jobs = [
+            Job(
+                job_id=str(1000 + i),
+                partition="a100_submit",
+                name=f"synthetic_job_{i}",
+                user="hli",
+                state="RUNNING",
+                node_or_reason="balar",
+                time_used="0:00:01",
+                time_left="N/A",
+                num_nodes=1,
+                num_cpus=4,
+                tres="cpu=4,mem=16G,gres/gpu=1",
+                alloc_mem="16G",
+                alloc_gpu="1",
+            )
+            for i in range(200)
+        ]
+        nodes = [
+            Node(
+                name=f"synth-{i:03d}",
+                partitions=["a100_submit"],
+                state="MIXED",
+                cpu_total=128, cpu_alloc=64,
+                cpu_load=1.0,
+                mem_total_mb=512_000, mem_alloc_mb=256_000,
+                mem_free_mb=256_000,
+                gpus=[GpuSpec(kind="A100", total=8, alloc=4, vram="80GB")],
+            )
+            for i in range(100)
+        ]
+        storage = [
+            StorageEntry(
+                label=f"/cluster/synth-{i:03d}",
+                used_bytes=10**12 * i, total_bytes=10**13,
+                source="df", path=f"/cluster/synth-{i:03d}",
+                avail_bytes=10**13 - 10**12 * i,
+            )
+            for i in range(50)
+        ]
+        snap = Snapshot(jobs=jobs, nodes=nodes, storage=storage)
+
+        # Focus filter and start typing IMMEDIATELY after assigning
+        # snapshot — the broadcast worker is now spinning through 200
+        # rebuild rows.
+        table = app.query_one(JobsTable)
+        inp = table.query_one("#filter", Input)
+        inp.focus()
+        await pilot.pause()
+        app.snapshot = snap   # kicks the broadcast worker
+
+        for c in "testhello":
+            await pilot.press(c)
+            await pilot.pause(0.6)
+
+        # Settle the debounce + any tail of the broadcast.
+        await pilot.pause(0.5)
+        assert inp.value == "testhello", (
+            f"input dropped chars during heavy broadcast: {inp.value!r}"
+        )

@@ -695,7 +695,11 @@ class JobsTable(Widget):
             "mem": j.alloc_mem,
         }
 
-    def update_snapshot(self, snapshot: Snapshot) -> None:
+    async def update_snapshot(self, snapshot: Snapshot) -> None:
+        """Async + chunked rebuild — yields the event loop every 50 row
+        mutations so input dispatch isn't held during a refresh tick.
+        See _apply_filter_async for the same pattern in the filter path.
+        """
         self._last_snapshot = snapshot
         table = self.query_one("#jobs_table_dt", DataTable)
         prev_scroll_x = table.scroll_x
@@ -729,6 +733,7 @@ class JobsTable(Widget):
             self._applied_sort = current_sort
 
         new_keys: set[str] = set()
+        mut_count = 0
         for j in jobs:
             row = self._row_for_job(j, self.mode)
             new_keys.add(j.job_id)
@@ -743,6 +748,9 @@ class JobsTable(Widget):
                 values = [row[k] for k, _l, _w, _s in self._current_columns]
                 rk = table.add_row(*values, key=j.job_id)
                 self._row_keys[j.job_id] = rk
+            mut_count += 1
+            if mut_count % 50 == 0:
+                await asyncio.sleep(0)
 
         for stale_key in list(self._row_keys.keys() - new_keys):
             try:
@@ -750,6 +758,9 @@ class JobsTable(Widget):
             except Exception:
                 pass
             del self._row_keys[stale_key]
+            mut_count += 1
+            if mut_count % 50 == 0:
+                await asyncio.sleep(0)
 
         if not jobs:
             n_cols = len(self._current_columns)

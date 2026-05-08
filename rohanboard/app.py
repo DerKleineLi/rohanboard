@@ -375,29 +375,36 @@ class RohanBoardApp(App):
 
         `batch_update()` coalesces the resulting screen refreshes into a
         single paint once the fan-out completes.
+
+        Widgets may declare `update_snapshot` as either sync or async.
+        Async handlers chunk their internal rebuild via
+        `await asyncio.sleep(0)` every ~50 mutations — same pattern as
+        JobsTable._apply_filter_async — so input dispatch isn't held
+        for the full duration of a heavy table rebuild.
         """
+        import inspect
         import time as _t
         with perf_block("fanout", "all"), self.batch_update():
             for widget in list(self.query("*")):
                 handler = getattr(widget, "update_snapshot", None)
                 if not callable(handler):
                     continue
-                if perf_enabled():
-                    t0 = _t.perf_counter()
-                    try:
-                        handler(new)
-                    except Exception:
+                t0 = _t.perf_counter() if perf_enabled() else 0.0
+                try:
+                    result = handler(new)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    if perf_enabled():
                         perf_log("widget", type(widget).__name__,
                                  (_t.perf_counter() - t0) * 1000, extra="error")
-                        continue
-                    perf_log("widget", type(widget).__name__,
-                             (_t.perf_counter() - t0) * 1000)
-                else:
-                    try:
-                        handler(new)
-                    except Exception:
+                    else:
                         import traceback
                         self.log(f"update_snapshot failed for {widget!r}\n{traceback.format_exc()}")
+                    continue
+                if perf_enabled():
+                    perf_log("widget", type(widget).__name__,
+                             (_t.perf_counter() - t0) * 1000)
                 # Sleep ~1 ms — long enough that the 50 ms (20 FPS)
                 # animation timer has a real chance to fire between
                 # widget updates rather than getting starved by a tight
