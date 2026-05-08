@@ -121,10 +121,15 @@ DEFAULT_SKIP_FSTYPES: frozenset[str] = frozenset({
 
 
 def discover_mounts(
+    proc_mounts_text: str,
     prefixes: list[str],
     skip_fstypes: frozenset[str] = DEFAULT_SKIP_FSTYPES,
 ) -> list[tuple[str, str]]:
-    """Enumerate active mounts under any of `prefixes`. Returns (label, path) pairs.
+    """Parse `/proc/mounts` text and return (label, path) pairs for any
+    mount under one of `prefixes`.
+
+    Pure parser — no I/O. Caller fetches the text (locally for
+    LocalExecutor or via `fetch_proc_mounts(executor)` for SSH).
 
     Dedupe rules:
       - skip uninteresting fstypes (overlays, fuse user-binds, kernel pseudo-fs)
@@ -134,12 +139,7 @@ def discover_mounts(
     out: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     norm_prefixes = [p.rstrip("/") for p in prefixes]
-    try:
-        with open("/proc/mounts") as f:
-            lines = f.readlines()
-    except OSError:
-        return out
-    for line in lines:
+    for line in proc_mounts_text.splitlines():
         parts = line.split()
         if len(parts) < 3:
             continue
@@ -154,4 +154,18 @@ def discover_mounts(
         seen.add(key)
         out.append((mp, mp))
     out.sort(key=lambda x: x[0].lower())
+    return out
+
+
+async def fetch_proc_mounts(executor: Executor) -> str:
+    """Read `/proc/mounts` via the executor. Returns "" on failure so a
+    transient SSH glitch doesn't crash the refresh tick — callers
+    interpret empty text as "no mounts visible" and skip the fanout.
+    """
+    try:
+        rc, out, _err = await executor.run(["cat", "/proc/mounts"], timeout=10.0)
+    except Exception:
+        return ""
+    if rc != 0:
+        return ""
     return out

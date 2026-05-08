@@ -256,7 +256,11 @@ class RohanBoardApp(App):
                             entries.append(e)
                     elif entry_cfg.kind == "auto":
                         prefixes = entry_cfg.prefixes or ["/cluster", "/cluster_HDD"]
-                        discovered = storage.discover_mounts(prefixes)
+                        # Route /proc/mounts read through the executor so this
+                        # works under exec = "ssh:<host>" (would otherwise read
+                        # the WSL mount table and find nothing under /cluster*).
+                        proc_mounts = await storage.fetch_proc_mounts(self.executor)
+                        discovered = storage.discover_mounts(proc_mounts, prefixes)
                         # df all of them in parallel
                         results = await asyncio.gather(
                             *[storage.fetch_df(self.executor, label, path) for label, path in discovered],
