@@ -16,15 +16,18 @@ from .fixed_sparkline import FixedSparkline as Sparkline
 
 
 class UtilizationPanel(Widget):
-    # Useful min height — border(2) + title(1) + title margins(2) + padding
-    # bot(1) + body(3 labels=3 + 3 sparks @≥1 each=3) = 12; +1 for the
-    # margin between cards in the OverviewPanel grid. Layouts that can't
-    # spare this many rows should NOT mount a UtilizationPanel at all.
-    # The CSS `min-height: 8` below is the absolute floor (sparks at 1
-    # row, no breathing room); the dashboard's `UTIL_MIN_HEIGHT` checks
-    # use this constant instead so both numbers live next to the widget
-    # they describe.
-    MIN_HEIGHT = 13
+    # Phase 4d.2-E: lowered from 13 → 8 by adapting to a single-row
+    # layout (3 sparklines side-by-side rather than stacked) when the
+    # caller hands us less than COMPACT_THRESHOLD rows. The absolute
+    # floor (border 2 + title 1 + margins 2 + 1 label-row + 1 spark-row
+    # + padding 1 = 8) is what `min-height` enforces below; the
+    # OverviewPanel's `decide_layout` uses this constant to decide
+    # whether util fits in the column slack.
+    MIN_HEIGHT = 8
+    # Below this height (in rows of the panel itself, including border
+    # + padding) we render the three metrics side-by-side. Above it,
+    # the classic vertical stack with full sparkline body.
+    COMPACT_THRESHOLD = 12
 
     DEFAULT_CSS = """
     UtilizationPanel {
@@ -43,6 +46,12 @@ class UtilizationPanel(Widget):
     UtilizationPanel > .body {
         height: 1fr;
         min-height: 0;
+        layout: vertical;
+    }
+    UtilizationPanel .metric_cell {
+        height: 1fr;
+        min-height: 2;
+        layout: vertical;
     }
     UtilizationPanel .label {
         height: 1;
@@ -58,14 +67,34 @@ class UtilizationPanel(Widget):
     UtilizationPanel #spark_gpu > .sparkline--min-color { color: $warning-darken-2; }
     UtilizationPanel #spark_mem > .sparkline--max-color { color: $accent; }
     UtilizationPanel #spark_mem > .sparkline--min-color { color: $accent-darken-2; }
+
+    /* Compact mode: body becomes 3 horizontal cells, each with its
+       own label-on-top sparkline-below stack. Triggered when the
+       allocated height is too small for the vertical 3-stack. */
+    UtilizationPanel.compact > .body {
+        layout: grid;
+        grid-size: 3 1;
+        grid-gutter: 0 2;
+    }
     """
 
     def compose(self) -> ComposeResult:
         yield Static("Utilization", classes="title")
         with Vertical(classes="body"):
             for metric in ("cpu", "gpu", "mem"):
-                yield Static(metric.upper(), classes="label", id=f"lbl_{metric}")
-                yield Sparkline([0.0], summary_function=max, id=f"spark_{metric}")
+                with Vertical(classes="metric_cell"):
+                    yield Static(metric.upper(), classes="label", id=f"lbl_{metric}")
+                    yield Sparkline([0.0], summary_function=max, id=f"spark_{metric}")
+
+    def on_resize(self) -> None:
+        """Toggle the compact (single-row) layout based on the height the
+        parent layout actually handed us. Hysteresis isn't critical
+        here — the threshold is well away from typical fit sizes."""
+        h = int(self.size.height or 0)
+        if 0 < h < self.COMPACT_THRESHOLD:
+            self.add_class("compact")
+        else:
+            self.remove_class("compact")
 
     def update_snapshot(self, snapshot: Snapshot) -> None:
         history = snapshot.history

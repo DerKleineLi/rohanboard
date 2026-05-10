@@ -18,6 +18,7 @@ layout engine does the balancing for free.
 from __future__ import annotations
 
 import datetime as _dt
+from dataclasses import dataclass
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -267,6 +268,114 @@ class AsciiArt(Widget):
 
 
 # ────────────────────────────────────────────────────────────────────────
+# OverviewPanel — pure layout decision
+# ────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class LayoutDecision:
+    """Pure-function output of `decide_layout`. The OverviewPanel reads
+    this and applies it imperatively (mounting cards, setting heights);
+    keeping the math out of the widget makes it table-testable.
+
+    Phase 4d.2-E spec (verbatim from user, message_id 1502963258083115120):
+
+        right_natural = min(height, compactjobs)         # cap by WINDOW HEIGHT
+        target        = max(left_natural, right_natural)
+        gap_right     = target - right_natural
+        gap_left      = target - left_natural
+
+        if gap_right >= UTIL_MIN: util on right (h = gap_right)
+        elif gap_left >= UTIL_MIN: util on left  (h = gap_left)
+        else:
+            util hidden
+            if left_nat > right_nat:  compact_jobs.h = target
+            elif right_nat > left_nat:
+                add_n = (right_nat - left_nat) // 2
+                add_h =  right_nat - left_nat - add_n
+                nodesummary.h += add_n
+                home.h        += add_h
+    """
+    mode: str                        # "narrow" or "wide"
+    util_side: str | None            # "left", "right", or None
+    target: int                      # main grid height in wide mode (rows)
+    fit: bool
+    ascii_budget: int
+    show_ascii: bool
+    nodesummary_extra: int = 0       # rows added beyond _TOTALS_NATURAL (right>left no-util)
+    home_extra: int = 0              # rows added beyond _HOME_NATURAL (right>left no-util)
+    compact_jobs_flex: bool = False  # CompactJobs flex-fills the right column (left>right no-util)
+
+
+def decide_layout(
+    *,
+    w: int,
+    h: int,
+    jobs_nat: int,
+    util_min: int,
+    wide_min_width: int,
+    totals_natural: int,
+    home_natural: int,
+    ascii_min_total: int,
+) -> LayoutDecision:
+    """Pure decision function — no Textual access. See `LayoutDecision`
+    docstring for the spec."""
+    if w < wide_min_width:
+        # Narrow: single column, all natural; parent scroll handles overflow.
+        # NodesSummary collapses to a 6-row compact form below ~60 cols.
+        totals_h = 6 if w < 60 else totals_natural
+        target = totals_h + 1 + home_natural + 1 + jobs_nat
+        fit = target <= h
+        ascii_budget = max(h - target, 0) if fit else 0
+        show_ascii = fit and ascii_budget >= ascii_min_total
+        return LayoutDecision(
+            mode="narrow", util_side=None, target=target, fit=fit,
+            ascii_budget=ascii_budget, show_ascii=show_ascii,
+        )
+
+    # Wide.
+    left_nat = totals_natural + 1 + home_natural
+    right_nat = min(h, jobs_nat)        # CAP BY WINDOW HEIGHT, NOT left_nat
+    target = max(left_nat, right_nat)
+    gap_right = target - right_nat
+    gap_left = target - left_nat
+
+    util_side: str | None = None
+    nodes_extra = 0
+    home_extra = 0
+    compact_flex = False
+
+    if gap_right >= util_min:
+        util_side = "right"
+    elif gap_left >= util_min:
+        util_side = "left"
+    else:
+        # Util doesn't fit. Distribute the slack so the columns balance.
+        if left_nat > right_nat:
+            # Right col is shorter by gap_right < util_min — stretch
+            # CompactJobs (it has a VerticalScroll body so the cell fills
+            # `target` and any overflow scrolls internally).
+            compact_flex = True
+        elif right_nat > left_nat:
+            # Left col is shorter by gap_left < util_min — grow Totals
+            # and Home to fill. Half/half-ish; remainder goes to home.
+            diff = right_nat - left_nat
+            nodes_extra = diff // 2
+            home_extra = diff - nodes_extra
+        # else: equal, no balance needed.
+
+    fit = target <= h
+    ascii_budget = max(h - target, 0) if fit else 0
+    show_ascii = fit and ascii_budget >= ascii_min_total
+    return LayoutDecision(
+        mode="wide", util_side=util_side, target=target,
+        fit=fit, ascii_budget=ascii_budget, show_ascii=show_ascii,
+        nodesummary_extra=nodes_extra, home_extra=home_extra,
+        compact_jobs_flex=compact_flex,
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────
 # OverviewPanel — simple 1/2-column layout
 # ────────────────────────────────────────────────────────────────────────
 
@@ -335,6 +444,7 @@ class OverviewPanel(Widget):
         super().__init__()
         self._job_count = 0
         self._last_layout: tuple | None = None
+        self._last_decision: LayoutDecision | None = None
         self._ascii_budget = 0
 
     def compose(self) -> ComposeResult:
@@ -382,47 +492,26 @@ class OverviewPanel(Widget):
 
     def _relayout(self) -> None:
         w, h = self._available_size()
-        jobs_nat = self._jobs_natural()
-        if w < self.WIDE_MIN_WIDTH:
-            mode = "narrow"
-            # NodesSummary uses its full multiline format unless really
-            # cramped (<60 cols), so size for the full form here.
-            totals_h = 6 if w < 60 else self._TOTALS_NATURAL
-            natural_need = totals_h + 1 + self._HOME_NATURAL + 1 + jobs_nat
-            util_side = None
-        else:
-            mode = "wide"
-            left_nat = self._TOTALS_NATURAL + 1 + self._HOME_NATURAL
-            # Cap the right column at the left column's natural height so
-            # the wide-mode grid (both cols 1fr → equal) never has to
-            # stretch one side and shrink the other. CompactJobs has its
-            # own VerticalScroll body, so the cap is "ok, it'll scroll
-            # internally", not "we lose rows". The +1-for-margin gap test
-            # below then becomes a clean two-way decision: util fits on
-            # the right (where jobs sits in a shorter natural height) or
-            # nowhere — there's no longer a left-side util case, since
-            # right_nat ≤ left_nat by construction.
-            right_nat = min(left_nat, jobs_nat)
-            natural_need = max(left_nat, right_nat)
-            shorter_nat = min(left_nat, right_nat)
-            gap = natural_need - shorter_nat
-            util_side = None
-            if natural_need <= h and gap >= UtilizationPanel.MIN_HEIGHT + 1:
-                util_side = "right"
-        # Scroll mode when the minimum natural layout can't fit the window.
-        fit = natural_need <= h
-        if fit:
-            target = natural_need
-            ascii_budget = max(h - target, 0)
-            show_ascii = ascii_budget >= ASCII_MIN_TOTAL
-        else:
-            target = natural_need    # not actually applied (scroll mode uses auto)
-            ascii_budget = 0
-            show_ascii = False
-        layout = (mode, util_side, show_ascii, target, min(ascii_budget, 15), fit)
+        decision = decide_layout(
+            w=w, h=h,
+            jobs_nat=self._jobs_natural(),
+            util_min=UtilizationPanel.MIN_HEIGHT,
+            wide_min_width=self.WIDE_MIN_WIDTH,
+            totals_natural=self._TOTALS_NATURAL,
+            home_natural=self._HOME_NATURAL,
+            ascii_min_total=ASCII_MIN_TOTAL,
+        )
+        # Cache as a tuple so equality short-circuits a no-op repaint.
+        layout = (
+            decision.mode, decision.util_side, decision.show_ascii,
+            decision.target, min(decision.ascii_budget, 15), decision.fit,
+            decision.nodesummary_extra, decision.home_extra,
+            decision.compact_jobs_flex,
+        )
         if layout == self._last_layout:
             return
         self._last_layout = layout
+        self._last_decision = decision
         self._populate()
 
     def _jobs_natural(self) -> int:
@@ -439,47 +528,74 @@ class OverviewPanel(Widget):
         ascii_row = self.query_one("#ascii_row", Vertical)
         ascii_row.remove_children()
 
-        mode, util_side, show_ascii, target, ascii_budget, fit = self._last_layout  # type: ignore
+        d = self._last_decision
+        if d is None:    # _populate called before _relayout — defensive.
+            return
 
         # Toggle classes for the right CSS branch.
         for cls in ("narrow", "wide", "fit", "scroll"):
             self.remove_class(cls)
-        self.add_class(mode)
-        self.add_class("fit" if fit else "scroll")
-        if fit and mode == "wide":
-            main.styles.height = target
+        self.add_class(d.mode)
+        self.add_class("fit" if d.fit else "scroll")
+        if d.fit and d.mode == "wide":
+            main.styles.height = d.target
         else:
             main.styles.height = None
 
-        if mode == "narrow":
+        if d.mode == "narrow":
             # Single col, all natural — overflow handled by parent scroll.
             main.mount(_card(NodesSummary()))
             main.mount(_card(HomeStorage()))
             main.mount(_card(CompactJobs()))
+            return
+
+        # Wide mode.
+        main.styles.grid_size_columns = 2
+        col_left = Vertical(classes="col")
+        col_right = Vertical(classes="col")
+        main.mount(col_left)
+        main.mount(col_right)
+
+        # Phase 4d.2-E: per the user's pseudocode, util can mount on the
+        # LEFT column (when right is taller and gap_left fits util_min)
+        # or on the RIGHT (gap_right fits util_min); when neither, the
+        # decision tells us how to balance the columns instead.
+        nodes = NodesSummary()
+        home = HomeStorage()
+        # Apply explicit per-widget heights from the no-util right>left
+        # balance branch. nodesummary_extra / home_extra are 0 in every
+        # other case; setting `height = natural + 0` is a no-op.
+        if d.nodesummary_extra:
+            nodes.styles.height = self._TOTALS_NATURAL + d.nodesummary_extra
+        if d.home_extra:
+            home.styles.height = self._HOME_NATURAL + d.home_extra
+        col_left.mount(_card(nodes))
+
+        if d.util_side == "left":
+            # Util on the left → HomeStorage natural, UtilizationPanel
+            # flex-fills the gap_left slack. Right column is just
+            # CompactJobs (which is naturally taller than left_nat).
+            col_left.mount(_card(home))
+            col_left.mount(_card(UtilizationPanel(), flex=True))
+            col_right.mount(_card(CompactJobs(), flex=True))
+        elif d.util_side == "right":
+            # Util on the right → HomeStorage flex-fills gap_right
+            # slack on the left, UtilizationPanel sits below
+            # CompactJobs on the right.
+            col_left.mount(_card(home, flex=True))
+            col_right.mount(_card(CompactJobs()))
+            col_right.mount(_card(UtilizationPanel(), flex=True))
         else:
-            main.styles.grid_size_columns = 2
-            col_left = Vertical(classes="col")
-            col_right = Vertical(classes="col")
-            main.mount(col_left)
-            main.mount(col_right)
+            # No util. Balance per `compact_jobs_flex` / nodes_extra /
+            # home_extra. When left_nat > right_nat, stretch CompactJobs
+            # (its body scrolls internally). Otherwise the explicit
+            # heights set above on Totals/Home fill the slack.
+            col_left.mount(_card(home))
+            col_right.mount(_card(CompactJobs(), flex=d.compact_jobs_flex))
 
-            col_left.mount(_card(NodesSummary()))
-            # With right_nat capped at left_nat, util_side is either
-            # "right" (slack on the right column → util mounts there)
-            # or None (no slack → no util at all). Stretch HomeStorage
-            # only in the no-util case so the left col fills the grid.
-            col_left.mount(_card(HomeStorage(), flex=(util_side is None)))
-
-            if util_side == "right":
-                col_right.mount(_card(CompactJobs()))
-                col_right.mount(_card(UtilizationPanel(), flex=True))
-            else:
-                # right col has just jobs — stretch it so the columns match.
-                col_right.mount(_card(CompactJobs(), flex=True))
-
-        if show_ascii:
+        if d.show_ascii:
             ascii_row.remove_class("hidden")
-            ascii_row.mount(self._make_decor(ascii_budget))
+            ascii_row.mount(self._make_decor(d.ascii_budget))
         else:
             ascii_row.add_class("hidden")
 
