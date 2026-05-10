@@ -42,20 +42,29 @@ class RohanBoardApp(App):
         ("r", "refresh", "Refresh"),
         # Jobs-specific actions — hidden and disabled off the Jobs tab via
         # `check_action` below.
-        ("a", "jobs_toggle", "Active/Recent"),
+        # Phase 4d.2-D: `a` toggles mine_only (instant, client-side); `t`
+        # toggles Active vs. Recent mode (was on `a` pre-Phase-4d.2-D).
+        ("a", "jobs_mine_toggle", "Mine/All"),
+        ("t", "jobs_toggle", "Active/Recent"),
         ("l", "jobs_tail_log", "Tail log"),
     ]
 
     snapshot: reactive[Snapshot] = reactive(Snapshot, recompose=False, layout=False)
+    # Phase 4d.2-D: mine_only is now a CLIENT-side filter — JobsTable and
+    # CompactJobs read it at render time and slice the in-memory snapshot.
+    # Toggling fires `watch_mine_only` below, which re-broadcasts the
+    # cached snapshot so every subscribing widget repaints with the new
+    # filter; no refetch. `init=False` skips the watcher call on initial
+    # default-value handling — the first real snapshot fires the
+    # broadcast via `watch_snapshot`; if we let the mine_only watcher
+    # fire on init it races watch_snapshot for the same `exclusive=True`
+    # worker slot and one of the two coroutines leaks unawaited.
+    mine_only: reactive[bool] = reactive(True, recompose=False, layout=False, init=False)
 
     def __init__(self, config: Config | None = None) -> None:
         super().__init__()
         self.cfg = config or load_config()
         self._history: deque[UtilizationSample] = deque(maxlen=HISTORY_CAP)
-        # `mine_only` drives whether `-u $USER` is passed to squeue/sacct.
-        # The "Mine only" pill in the Jobs tab flips this and triggers a
-        # fresh fetch — no need for client-side filtering.
-        self.mine_only: bool = True
         # Phase 4c: collectors take an Executor.  Picker is config-driven:
         #   exec = "local"      → LocalExecutor (default)
         #   exec = "ssh:<host>" → AsyncSSHExecutor(host=<host>) — uses
@@ -180,7 +189,7 @@ class RohanBoardApp(App):
         We want Jobs-only shortcuts to *disappear* on other tabs, not grey
         out, so we return False off-tab.
         """
-        if action in ("jobs_toggle", "jobs_tail_log"):
+        if action in ("jobs_toggle", "jobs_tail_log", "jobs_mine_toggle"):
             try:
                 active = self.query_one(TabbedContent).active
             except Exception:
@@ -214,6 +223,14 @@ class RohanBoardApp(App):
         if jt := self._visible_jobs_table():
             jt.action_toggle_mode()
 
+    def action_jobs_mine_toggle(self) -> None:
+        """Phase 4d.2-D: instant mine/all toggle on the Jobs tab. The
+        flip is client-side — JobsTable.watch_mine_only updates the
+        pill class and writes back to App.mine_only, which fires
+        App.watch_mine_only → re-broadcast of the cached snapshot."""
+        if jt := self._visible_jobs_table():
+            jt.mine_only = not jt.mine_only
+
     def action_jobs_tail_log(self) -> None:
         if jt := self._visible_jobs_table():
             jt.action_tail_log()
@@ -226,7 +243,12 @@ class RohanBoardApp(App):
     async def _refresh_all(self) -> None:
         snap = Snapshot()
 
-        users_for_fetch = ["self"] if self.mine_only else ["all"]
+        # Phase 4d.2-D: always fetch all-users data; `mine_only` is now a
+        # client-side filter applied in JobsTable / CompactJobs at render
+        # time. Toggling mine_only no longer triggers a refetch — both
+        # views just re-render from the cached snapshot. Cost: every tick
+        # carries the all-users squeue/sacct payload (~150 KB at LRZ peak,
+        # noise on rohan). Win: instant `a` toggle, no spinner-reload UX.
 
         # Build the per-tick collector inputs from cfg.storage_entries.
         # Multiple kind=quota entries: only the first is realized — the
@@ -268,17 +290,13 @@ class RohanBoardApp(App):
                 elif entry_cfg.mode == "container":
                     dssusrinfo_subcommands.append("container_usage")
 
-        squeue_users_resolved: list[str] | None = None
-        sacct_users_resolved: list[str] | None = None
-        if users_for_fetch and "all" not in users_for_fetch:
-            resolved = [
-                cluster_user if u == "self" else u
-                for u in users_for_fetch
-            ]
-            resolved = [u for u in resolved if u]
-            if resolved:
-                squeue_users_resolved = resolved
-                sacct_users_resolved = resolved
+        # squeue/sacct user-filter args are always None now — we fetch
+        # all users every tick (Phase 4d.2-D). The collector still
+        # supports the per-user shape; we just don't use it from the
+        # dashboard anymore. `[[slurm.users]]` in TOML / cfg.slurm.users
+        # is also bypassed; if a future use case wants server-side
+        # filtering back, gate it behind a `cfg.slurm.fetch_strategy`
+        # knob rather than `mine_only`.
 
         # ── one ssh channel per tick — see collectors/combined.py ──
         try:
@@ -289,10 +307,10 @@ class RohanBoardApp(App):
                     df_explicit_paths=[p for _l, p in df_explicit],
                     df_prefix_globs=df_globs,
                     squeue_format=slurm.SQUEUE_O_FORMAT,
-                    squeue_users=squeue_users_resolved,
+                    squeue_users=None,
                     sacct_format=slurm.SACCT_FORMAT,
                     sacct_starttime="now-3days",
-                    sacct_users=sacct_users_resolved,
+                    sacct_users=None,
                     dssusrinfo_subcommands=dssusrinfo_subcommands,
                 )
         except Exception as e:
@@ -400,6 +418,10 @@ class RohanBoardApp(App):
                 mem=mem_alloc / mem_total,
             ))
         snap.history = list(self._history)
+        # Phase 4d.2-D: stamp the resolved REMOTE whoami onto the
+        # snapshot so JobsTable / CompactJobs can filter `mine_only`
+        # client-side without poking the executor at render time.
+        snap.cluster_user = cluster_user
         # Reactive write — synchronously triggers watch_snapshot fan-out.
         with perf_block("refresh", "reactive_set"):
             self.snapshot = snap
@@ -428,6 +450,40 @@ class RohanBoardApp(App):
         # frames interleave with the refresh instead of starving them.
         self.run_worker(self._broadcast_snapshot(new),
                         exclusive=True, name="broadcast_snapshot")
+
+    def watch_mine_only(self, _old: bool, new: bool) -> None:
+        """Phase 4d.2-D: mine_only is a client-side filter — flipping it
+        doesn't require a refetch. Just re-broadcast the cached snapshot
+        so JobsTable + CompactJobs (and anything else reading the flag)
+        repaint with the new filter at the same moment.
+
+        Sync JobsTable.mine_only so its pill class stays consistent
+        when the flag is flipped via any path (App-level set, key
+        binding, etc.) — JobsTable.watch_mine_only also writes back
+        to App.mine_only, but Textual reactives don't refire on
+        same-value assignments so there's no loop.
+
+        Guard the broadcast against firing before the app is running —
+        Textual fires watchers on initial reactive-default assignment
+        too, and at that point the worker manager isn't ready. Build
+        the coroutine explicitly so we can `.close()` it on early
+        returns; otherwise it leaks as an orphan "coroutine was never
+        awaited" warning at GC time.
+        """
+        try:
+            for jt in self.query(JobsTable):
+                if jt.mine_only != new:
+                    jt.mine_only = new
+        except Exception:
+            pass
+        coro = self._broadcast_snapshot(getattr(self, "snapshot", Snapshot()))
+        if not getattr(self, "is_running", False):
+            coro.close()
+            return
+        try:
+            self.run_worker(coro, exclusive=True, name="broadcast_snapshot")
+        except Exception:
+            coro.close()
 
     async def _broadcast_snapshot(self, new: Snapshot) -> None:
         """Push `new` into every widget that implements update_snapshot,

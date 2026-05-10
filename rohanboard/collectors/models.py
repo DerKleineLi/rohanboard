@@ -128,3 +128,9 @@ class Snapshot:
     history: list[UtilizationSample] = field(default_factory=list)
     fetched_at: datetime = field(default_factory=datetime.now)
     errors: dict[str, str] = field(default_factory=dict)   # collector_name -> error text
+    # Phase 4d.2-D: REMOTE whoami (e.g. "di35dob" on ssh:lrz, "hli" on
+    # ssh:rohan) — stamped each tick so widgets can do client-side
+    # `mine_only` filtering without poking the executor. Empty string
+    # if whoami hasn't resolved yet (cold start); widgets treat that
+    # as "show everything" since we can't tell which row is yours.
+    cluster_user: str = ""
