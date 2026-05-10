@@ -116,6 +116,15 @@ class RohanBoardApp(App):
 
     async def on_mount(self) -> None:
         self._apply_size_class(self.size.width)
+        # Resolve `users = ["self"]` ONCE up front via `whoami` over the
+        # executor — this gives the REMOTE username (e.g. "di35dob" on
+        # ssh:lrz) instead of the WSL-side $USER ("hli"). Caches on the
+        # executor; subsequent ticks read it from cache for free. Empty
+        # string fallback keeps the app usable if whoami fails.
+        try:
+            await self.executor.resolve_whoami(timeout=20.0)
+        except Exception:
+            pass
         # Kick off the first refresh as a worker (decorator-driven); UI
         # paints the empty snapshot immediately and the first real tick
         # writes self.snapshot when it lands.
@@ -221,6 +230,10 @@ class RohanBoardApp(App):
         # configs are rare; if needed, route extras as kind=df and parse
         # them separately.) df paths/globs are concatenated into one
         # `df -B1` invocation.
+        # Remote-resolved username (cached on the executor at on_mount).
+        # Falls back to "" if whoami failed; downstream filters skip empty.
+        cluster_user = getattr(self.executor, "_whoami", "") or ""
+
         quota_user: str | None = None
         quota_label: str | None = None
         quota_filesystem: str | None = None
@@ -229,8 +242,7 @@ class RohanBoardApp(App):
         for entry_cfg in self.cfg.storage_entries:
             if entry_cfg.kind == "quota":
                 if quota_user is None:
-                    import os as _os
-                    quota_user = _os.environ.get("USER", "") or None
+                    quota_user = cluster_user or None
                     quota_label = entry_cfg.label
                     quota_filesystem = entry_cfg.filesystem
             elif entry_cfg.kind == "df" and entry_cfg.path:
@@ -245,9 +257,8 @@ class RohanBoardApp(App):
         squeue_users_resolved: list[str] | None = None
         sacct_users_resolved: list[str] | None = None
         if users_for_fetch and "all" not in users_for_fetch:
-            import os as _os
             resolved = [
-                _os.environ.get("USER", "") if u == "self" else u
+                cluster_user if u == "self" else u
                 for u in users_for_fetch
             ]
             resolved = [u for u in resolved if u]

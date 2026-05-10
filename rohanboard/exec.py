@@ -71,6 +71,23 @@ class LocalExecutor:
     """Thin wrapper around `asyncio.create_subprocess_exec`. No persistent
     state; `aclose()` is a no-op."""
 
+    def __init__(self) -> None:
+        self._whoami: str | None = None
+
+    async def resolve_whoami(self, timeout: float = 5.0) -> str:
+        """Run `whoami` once, cache the result. Used to substitute
+        `"self"` → resolved-username in slurm user filters; the cache
+        means rohanboard's per-tick refresh doesn't pay a fork+exec
+        each time. Returns the empty string on failure (caller treats
+        as "no user filter")."""
+        if self._whoami is None:
+            try:
+                rc, out, _err = await self.run(["whoami"], timeout=timeout)
+                self._whoami = out.strip() if rc == 0 else ""
+            except Exception:
+                self._whoami = ""
+        return self._whoami
+
     async def run(
         self,
         argv: Sequence[str],
@@ -145,6 +162,23 @@ class AsyncSSHExecutor:
         # but this future-proofs us).
         self._conn: object | None = None
         self._connect_lock = asyncio.Lock()
+        # whoami cache — see `resolve_whoami`. Resolved once over the
+        # persistent connection at App startup so the per-tick squeue/sacct
+        # filters substitute `"self"` → REMOTE username instead of
+        # client-side $USER (which would mis-resolve to "hli" on a WSL
+        # host running `exec = "ssh:lrz"` where the LRZ user is "di35dob").
+        self._whoami: str | None = None
+
+    async def resolve_whoami(self, timeout: float = 15.0) -> str:
+        """Run `whoami` over the SSH connection, cache the result.
+        Default timeout=15s tolerates LRZ's ~10.5s ProxyJump cold-connect."""
+        if self._whoami is None:
+            try:
+                rc, out, _err = await self.run(["whoami"], timeout=timeout)
+                self._whoami = out.strip() if rc == 0 else ""
+            except Exception:
+                self._whoami = ""
+        return self._whoami
 
     async def connect(self) -> None:
         """Eagerly open the persistent connection. Idempotent — a second

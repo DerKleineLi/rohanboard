@@ -140,9 +140,9 @@ def test_lrz_config_loads():
     project_root = Path(__file__).resolve().parent.parent
     cfg = load(project_root / "configs" / "lrz.toml")
     assert cfg.exec_spec == "ssh:lrz"
-    # users explicitly set to the LRZ user (NOT "self" — would resolve to
-    # WSL's $USER and miss the LRZ user's jobs).
-    assert cfg.slurm.users == ["di35dob"]
+    # users = ["self"] resolves to the REMOTE whoami at runtime (not the
+    # WSL $USER). Keeps configs PII-free.
+    assert cfg.slurm.users == ["self"]
     # ProxyJump cold ≈ 10.5 s; default 5 s would cancel mid-handshake.
     assert cfg.refresh.slurm_jobs >= 15
     # Storage entries: 3 df entries, no quota (LRZ login lacks the binary).

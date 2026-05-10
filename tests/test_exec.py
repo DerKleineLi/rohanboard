@@ -42,6 +42,7 @@ class FakeLocalExecutor:
         self._canned = canned or {}
         self._default = default
         self.calls: list[tuple[str, ...]] = []
+        self._whoami: str | None = None
 
     async def run(
         self,
@@ -51,6 +52,12 @@ class FakeLocalExecutor:
         key = tuple(argv)
         self.calls.append(key)
         return self._canned.get(key, self._default)
+
+    async def resolve_whoami(self, timeout: float = 5.0) -> str:
+        if self._whoami is None:
+            rc, out, _err = await self.run(["whoami"], timeout=timeout)
+            self._whoami = out.strip() if rc == 0 else ""
+        return self._whoami
 
     async def aclose(self) -> None:
         return None
@@ -111,6 +118,35 @@ async def test_local_aclose_is_noop_and_idempotent():
     ex = LocalExecutor()
     await ex.aclose()
     await ex.aclose()  # idempotent
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# resolve_whoami — substitute `users = ["self"]` with REMOTE whoami
+# ──────────────────────────────────────────────────────────────────────────
+
+async def test_local_resolve_whoami_caches_result():
+    """resolve_whoami runs once, caches, second call doesn't re-run."""
+    ex = LocalExecutor()
+    user = await ex.resolve_whoami()
+    assert user, "whoami should return non-empty for the test runner"
+    # Tamper with the cache; second call should NOT run subprocess.
+    ex._whoami = "sentinel"
+    user2 = await ex.resolve_whoami()
+    assert user2 == "sentinel"
+
+
+async def test_fake_resolve_whoami_uses_canned_response():
+    """FakeLocalExecutor's resolve_whoami honors canned ('whoami',) entry."""
+    fake = FakeLocalExecutor(canned={("whoami",): (0, "di35dob\n", "")})
+    user = await fake.resolve_whoami()
+    assert user == "di35dob"
+
+
+async def test_fake_resolve_whoami_empty_on_failure():
+    """rc != 0 → empty string, NOT exception. Caller treats as 'no filter'."""
+    fake = FakeLocalExecutor(default=(127, "", "command not found"))
+    user = await fake.resolve_whoami()
+    assert user == ""
 
 
 # ──────────────────────────────────────────────────────────────────────────

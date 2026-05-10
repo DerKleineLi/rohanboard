@@ -15,9 +15,9 @@
 #   filesystem row, but the v2 combined collector's label-override
 #   mapping requires the config path to match df's "Mounted on" column
 #   exactly — and df reports the mount root, not the subpath.
-# - users = ["di35dob"] is the LRZ username (different from WSL's $USER
-#   "hli"). "self" would resolve to $USER on the WSL side and miss the
-#   LRZ user's jobs.
+# - users = ["self"] resolves to the REMOTE `whoami` (e.g. "di35dob" on
+#   LRZ) — see exec.py::resolve_whoami. Configs are PII-free and safe
+#   to commit / share.
 # - [refresh] slurm_jobs bumped to 15 s so the first refresh tick doesn't
 #   cancel mid-handshake on the cold ProxyJump (~10.5 s).
 # - No [layout] / [overview] — Phase 4d.1 Task B made the rohan-style
@@ -26,7 +26,7 @@
 exec = "ssh:lrz"
 
 [slurm]
-users = ["di35dob"]
+users = ["self"]
 
 [refresh]
 slurm_jobs = 15
