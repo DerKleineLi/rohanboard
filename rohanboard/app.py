@@ -68,10 +68,14 @@ class RohanBoardApp(App):
         # Widget factories can reference per-widget config (e.g. filter presets).
         node_presets = self.cfg.presets.get("nodes", [])
         job_presets = self.cfg.presets.get("jobs", [])
+        node_extra_columns = list(self.cfg.nodes_table.columns)
         self._widget_factories: dict[str, Callable[[], Widget]] = {
             "storage_panel":     StoragePanel,
             "jobs_table":        lambda: JobsTable(presets=job_presets),
-            "nodes_table":       lambda: NodesTable(presets=node_presets),
+            "nodes_table":       lambda: NodesTable(
+                presets=node_presets,
+                extra_columns=node_extra_columns,
+            ),
             "nodes_summary":     NodesSummary,
             "utilization_panel": UtilizationPanel,
             "overview_panel":    OverviewPanel,
