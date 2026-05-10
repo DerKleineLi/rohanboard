@@ -25,10 +25,20 @@ DEFAULT_CONFIG_PATH = Path(
 @dataclass
 class StorageEntryConfig:
     label: str
-    kind: str                      # "quota", "df", or "auto"
+    kind: str                      # "quota", "df", "auto", "dssusrinfo"
     path: str | None = None
     filesystem: str | None = None  # for quota
     prefixes: list[str] | None = None  # for kind="auto"
+    # kind="dssusrinfo" (LRZ DSS): which sub-output to read.
+    #   "home"      → `dssusrinfo dsshome`        (per-user home dir)
+    #   "container" → `dssusrinfo container_usage`(project-shared container)
+    mode: str | None = None
+    container: str | None = None   # for mode="container" — DSS container name
+    # Explicit StoragePanel group override; when set, _classify uses it
+    # instead of the path-based fallback. Valid values are whatever
+    # StoragePanel.GROUP_ORDER carries (today: "home", "ssd", "hdd",
+    # "scratch", "persistent", "other").
+    group: str | None = None
 
 
 @dataclass
@@ -178,16 +188,32 @@ def load(path: Path | None = None) -> Config:
     storage_block = raw.get("storage", {})
     entries = storage_block.get("entries", []) if isinstance(storage_block, dict) else []
     if entries:
-        cfg.storage_entries = [
-            StorageEntryConfig(
-                label=e.get("label", e.get("path") or e.get("kind", "")),
-                kind=e["kind"],
+        cfg.storage_entries = []
+        for e in entries:
+            kind = e["kind"]
+            mode = e.get("mode")
+            container = e.get("container")
+            if kind == "dssusrinfo":
+                if mode not in ("home", "container"):
+                    raise ValueError(
+                        f"[[storage.entries]] label={e.get('label')!r}: "
+                        f"kind='dssusrinfo' requires mode in ('home', 'container'), got {mode!r}"
+                    )
+                if mode == "container" and not container:
+                    raise ValueError(
+                        f"[[storage.entries]] label={e.get('label')!r}: "
+                        f"kind='dssusrinfo' mode='container' requires `container` (DSS container name)"
+                    )
+            cfg.storage_entries.append(StorageEntryConfig(
+                label=e.get("label", e.get("path") or kind),
+                kind=kind,
                 path=e.get("path"),
                 filesystem=e.get("filesystem"),
                 prefixes=list(e["prefixes"]) if e.get("prefixes") else None,
-            )
-            for e in entries
-        ]
+                mode=mode,
+                container=container,
+                group=e.get("group"),
+            ))
     else:
         cfg.storage_entries = _default_storage()
 

@@ -84,12 +84,16 @@ class StorageEntry:
     used_bytes: int
     total_bytes: int            # for quota: soft limit; for df: filesystem size
     hard_limit_bytes: int | None = None   # quota only
-    source: str = "df"          # "df" or "quota"
+    source: str = "df"          # "df", "quota", or "dssusrinfo"
     path: str | None = None     # filesystem path (df) or device (quota)
     # df's "Available" column — what the *current user* can actually allocate.
     # Differs from `total_bytes - used_bytes` on filesystems with reserved-for-root
     # blocks (typically ~5% of total). None means "unknown, fall back to subtraction".
     avail_bytes: int | None = None
+    # Explicit StoragePanel group; when set, the panel's _classify uses
+    # this instead of its path-based fallback. Carries the value from
+    # StorageEntryConfig.group through the collector.
+    group: str | None = None
 
     @property
     def fraction(self) -> float:
