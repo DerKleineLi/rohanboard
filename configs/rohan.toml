@@ -1,0 +1,53 @@
+# rohanboard config for the rohan SLURM cluster (TUM I28).
+#
+# Usage:
+#   uv run rohanboard --config configs/rohan.toml
+#
+# - exec = "ssh:rohan" targets the login node — `quota` is only there,
+#   not on slurm/compute nodes (see CLAUDE_README.md known gotchas).
+# - Storage:
+#   - home: per-user quota via the `quota` binary on rohan login.
+#   - auto: discovers `/cluster/<node>` (per-node SSD) and
+#     `/cluster_HDD/<node>` (per-node HDD) NFS mounts at runtime via
+#     `cat /proc/mounts` over the executor.
+# - Per-node SSD/HDD columns on the Nodes tab opt in via
+#   [[nodes_table.columns]] — see Phase 4d.2-A.2. LRZ's config does not
+#   declare these (it has no `/cluster/<node>` autofs structure).
+# - users = ["self"] resolves to the REMOTE whoami (e.g. "hli" on rohan).
+
+exec = "ssh:rohan"
+
+[slurm]
+users = ["self"]
+
+[refresh]
+slurm_jobs = 5
+slurm_nodes = 30
+storage = 60
+
+[[storage.entries]]
+label = "home"
+kind = "quota"
+
+[[storage.entries]]
+label = "auto"
+kind = "auto"
+prefixes = ["/cluster", "/cluster_HDD"]
+
+# Per-node storage columns on the Nodes tab. Each column declares a
+# `source` handler that returns one (free, used, total) triple per node;
+# today only "storage_prefix" is wired (matches snapshot.storage entries
+# with path `<prefix>/<node-name>`). Future column types add a new
+# `source` value + collector helper, no NodesTable refactor.
+
+[[nodes_table.columns]]
+id = "ssd"
+header = "SSD"
+source = "storage_prefix"
+prefix = "/cluster"
+
+[[nodes_table.columns]]
+id = "hdd"
+header = "HDD"
+source = "storage_prefix"
+prefix = "/cluster_HDD"
