@@ -71,6 +71,31 @@ class OverviewConfig:
 
 
 @dataclass
+class NodesTableColumnConfig:
+    """One opt-in column on the Nodes-tab DataTable.
+
+    `source` is a registered handler key (today: "storage_prefix"). Future
+    columns add a new source value + a handler in nodes_table.py without
+    touching the config schema.
+
+    For source = "storage_prefix": `prefix` is the path-prefix to match
+    against snapshot.storage entries (e.g. "/cluster" → match per-node
+    NFS mounts under /cluster/<node>). The cell renders as the matching
+    StorageEntry's free / used / total triple via fat_bytes.
+    """
+    id: str            # column key in the DataTable (e.g. "ssd", "hdd")
+    header: str        # SortableHeader label (e.g. "SSD", "HDD")
+    source: str        # registered handler — today: "storage_prefix"
+    prefix: str | None = None     # for storage_prefix
+    width: int | None = None      # optional override; default sized for triples
+
+
+@dataclass
+class NodesTableConfig:
+    columns: list[NodesTableColumnConfig] = field(default_factory=list)
+
+
+@dataclass
 class Config:
     refresh: RefreshConfig = field(default_factory=RefreshConfig)
     slurm: SlurmConfig = field(default_factory=SlurmConfig)
@@ -78,6 +103,7 @@ class Config:
     layout: LayoutConfig = field(default_factory=LayoutConfig)
     theme: ThemeConfig = field(default_factory=ThemeConfig)
     overview: OverviewConfig = field(default_factory=OverviewConfig)
+    nodes_table: NodesTableConfig = field(default_factory=NodesTableConfig)
     presets: dict = field(default_factory=lambda: {"nodes": [], "jobs": []})
     # Phase 4c: which Executor backs collectors.
     #   "local"        → LocalExecutor (default; what 0612f58 baseline did)
@@ -180,6 +206,36 @@ def load(path: Path | None = None) -> Config:
 
     if o := raw.get("overview"):
         cfg.overview = OverviewConfig(animation=str(o.get("animation", "matrix")))
+
+    nodes_table_block = raw.get("nodes_table", {})
+    nt_columns_raw = (
+        nodes_table_block.get("columns", []) if isinstance(nodes_table_block, dict) else []
+    )
+    if nt_columns_raw:
+        cols: list[NodesTableColumnConfig] = []
+        for col in nt_columns_raw:
+            source = str(col.get("source", ""))
+            if source != "storage_prefix":
+                # Today only "storage_prefix" is implemented. Fail fast on
+                # an unknown source so a typo doesn't silently render an
+                # empty column.
+                raise ValueError(
+                    f"[[nodes_table.columns]] id={col.get('id')!r}: "
+                    f"unknown source {source!r} (expected 'storage_prefix')"
+                )
+            if not col.get("prefix"):
+                raise ValueError(
+                    f"[[nodes_table.columns]] id={col.get('id')!r}: "
+                    f"source='storage_prefix' requires `prefix`"
+                )
+            cols.append(NodesTableColumnConfig(
+                id=str(col["id"]),
+                header=str(col.get("header", col["id"].upper())),
+                source=source,
+                prefix=str(col["prefix"]),
+                width=int(col["width"]) if col.get("width") is not None else None,
+            ))
+        cfg.nodes_table = NodesTableConfig(columns=cols)
 
     # Phase 4c: top-level `exec` picks the Executor backend. We validate the
     # shape here at load time so a malformed `exec = "garbage"` fails fast

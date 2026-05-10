@@ -132,6 +132,58 @@ widgets = ["jobs_table"]
 # ──────────────────────────────────────────────────────────────────────────
 
 
+def test_rohan_config_loads():
+    """`configs/rohan.toml` parses cleanly: ssh:rohan, quota+auto storage,
+    and OPT-IN [[nodes_table.columns]] declaring ssd + hdd via the
+    `storage_prefix` source."""
+    project_root = Path(__file__).resolve().parent.parent
+    cfg = load(project_root / "configs" / "rohan.toml")
+    assert cfg.exec_spec == "ssh:rohan"
+    assert cfg.slurm.users == ["self"]
+    # storage: home (quota) + auto-discovery
+    by_label = {e.label: e for e in cfg.storage_entries}
+    assert by_label["home"].kind == "quota"
+    assert by_label["auto"].kind == "auto"
+    assert by_label["auto"].prefixes == ["/cluster", "/cluster_HDD"]
+    # opt-in extra columns
+    cols = cfg.nodes_table.columns
+    assert len(cols) == 2
+    assert cols[0].id == "ssd" and cols[0].source == "storage_prefix"
+    assert cols[0].prefix == "/cluster"
+    assert cols[1].id == "hdd" and cols[1].prefix == "/cluster_HDD"
+
+
+def test_config_with_no_nodes_table_section_has_zero_extra_columns(tmp_path):
+    """Default + minimal config = NO opt-in columns. The Nodes tab gets
+    just name/state/cpu/gpu/mem/partitions."""
+    cfg = load(_write(tmp_path, 'exec = "local"\n'))
+    assert cfg.nodes_table.columns == []
+
+
+def test_nodes_table_columns_unknown_source_raises(tmp_path):
+    """Typo in `source` fails at load time (not at first paint)."""
+    body = """
+[[nodes_table.columns]]
+id = "foo"
+header = "Foo"
+source = "storage-prefix"   # NOTE the dash typo
+prefix = "/cluster"
+"""
+    with pytest.raises(ValueError, match="unknown source"):
+        load(_write(tmp_path, body))
+
+
+def test_nodes_table_columns_storage_prefix_requires_prefix(tmp_path):
+    body = """
+[[nodes_table.columns]]
+id = "foo"
+header = "Foo"
+source = "storage_prefix"
+"""
+    with pytest.raises(ValueError, match="requires `prefix`"):
+        load(_write(tmp_path, body))
+
+
 def test_lrz_config_loads():
     """`configs/lrz.toml` parses cleanly and carries the LRZ-specific
     knobs from `cluster_lrz.md`: ssh:lrz exec, df-only storage, bumped
@@ -160,3 +212,7 @@ def test_lrz_config_loads():
     tabs = {t.id: t for t in cfg.layout.tabs}
     assert tabs["overview"].widgets == ["overview_panel"]
     assert tabs["nodes"].widgets == ["nodes_summary", "nodes_table"]
+    # LRZ does NOT declare [[nodes_table.columns]] — Nodes tab shows
+    # only the base columns (no per-node SSD/HDD; LRZ has no
+    # /cluster/<node> autofs structure).
+    assert cfg.nodes_table.columns == []
