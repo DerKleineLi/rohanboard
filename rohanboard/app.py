@@ -231,7 +231,17 @@ class RohanBoardApp(App):
     def on_tabbed_content_tab_activated(self, event) -> None:  # type: ignore[no-untyped-def]
         # Refresh footer / key dispatcher when user switches tabs so the
         # hidden shortcuts appear/disappear.
-        self.refresh_bindings()
+        # Phase 4d.2-E step 2.5: click marker so we can attribute any
+        # tab-switch latency. Tabs are eagerly composed in this codebase
+        # (no `lazy=True`), so the activation cost should be sub-ms —
+        # the perf rows confirm or refute that.
+        active = ""
+        try:
+            active = str(getattr(event, "tab", None) and event.tab.id) or ""
+        except Exception:
+            pass
+        with perf_block("click", "tab_activated", extra=f"active={active}"):
+            self.refresh_bindings()
 
     def _visible_jobs_table(self) -> JobsTable | None:
         """Return the JobsTable on the *currently active* tab, or None if
@@ -250,16 +260,22 @@ class RohanBoardApp(App):
         return None
 
     def action_jobs_toggle(self) -> None:
-        if jt := self._visible_jobs_table():
-            jt.action_toggle_mode()
+        # Phase 4d.2-E step 2.5: click marker. Sync portion only — the
+        # actual rebuild is dispatched async via watch_mode → update_snapshot.
+        with perf_block("click", "mode_toggle_action"):
+            if jt := self._visible_jobs_table():
+                jt.action_toggle_mode()
 
     def action_jobs_mine_toggle(self) -> None:
         """Phase 4d.2-D: instant mine/all toggle on the Jobs tab. The
         flip is client-side — JobsTable.watch_mine_only updates the
         pill class and writes back to App.mine_only, which fires
         App.watch_mine_only → re-broadcast of the cached snapshot."""
-        if jt := self._visible_jobs_table():
-            jt.mine_only = not jt.mine_only
+        # Phase 4d.2-E step 2.5: click marker. Sync portion only — the
+        # broadcast is dispatched via run_worker.
+        with perf_block("click", "mine_toggle_action"):
+            if jt := self._visible_jobs_table():
+                jt.mine_only = not jt.mine_only
 
     def action_jobs_tail_log(self) -> None:
         if jt := self._visible_jobs_table():
@@ -520,20 +536,25 @@ class RohanBoardApp(App):
         returns; otherwise it leaks as an orphan "coroutine was never
         awaited" warning at GC time.
         """
-        try:
-            for jt in self.query(JobsTable):
-                if jt.mine_only != new:
-                    jt.mine_only = new
-        except Exception:
-            pass
-        coro = self._broadcast_snapshot(getattr(self, "snapshot", Snapshot()))
-        if not getattr(self, "is_running", False):
-            coro.close()
-            return
-        try:
-            self.run_worker(coro, exclusive=True, name="broadcast_snapshot")
-        except Exception:
-            coro.close()
+        # Phase 4d.2-E step 2.5: time the synchronous portion of the
+        # mine_only watcher (sync JobsTable mirror + run_worker dispatch).
+        # The actual fanout happens in the worker — see fanout/all + the
+        # per-widget rows for that.
+        with perf_block("click", "mine_toggle_app_watcher", extra=f"new={new}"):
+            try:
+                for jt in self.query(JobsTable):
+                    if jt.mine_only != new:
+                        jt.mine_only = new
+            except Exception:
+                pass
+            coro = self._broadcast_snapshot(getattr(self, "snapshot", Snapshot()))
+            if not getattr(self, "is_running", False):
+                coro.close()
+                return
+            try:
+                self.run_worker(coro, exclusive=True, name="broadcast_snapshot")
+            except Exception:
+                coro.close()
 
     async def _broadcast_snapshot(self, new: Snapshot) -> None:
         """Push `new` into every widget that implements update_snapshot,

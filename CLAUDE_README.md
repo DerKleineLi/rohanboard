@@ -2,6 +2,12 @@
 
 This file is the project-local runbook for `rohanboard` on `clean-reimpl-v2`. Read before acting; update proactively with anything future-you would otherwise have to ask the user about.
 
+## Design principles
+
+> **Click → first visible content target: ~200 ms. Full render can take longer. If a full render exceeds the budget, prefer progressive rendering (first ~50 rows in ~200 ms, remainder in the background) over delaying everything until ready. The dashboard should always feel fast, even when the data is large.**
+
+This is load-bearing for architectural decisions. The data path (5 s tick, snapshot reactive, fanout broadcast) is decoupled from the render path on purpose — clicks should re-render from the cached snapshot, not refetch. When proposing optimizations, anchor on "what does the USER see in the first 200 ms" rather than "what's the total wall-clock to full table re-render". Phase 4d.2-E step 2.5 added `perf_block` instrumentation for this — run with `--debug` (or `ROHANBOARD_PERF_LOG=…`), the `filter/<path>_<mode>` rows carry `first_50_ms=…` and `chunks=…` extras so the breakdown is mechanical, not eyeballed.
+
 ## Project location + branch
 
 - **Path:** `~/workspace/rohanboard-local/` on WSL.

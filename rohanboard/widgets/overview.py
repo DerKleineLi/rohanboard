@@ -27,6 +27,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from ..collectors.models import Job, Snapshot
+from ..perf import perf_block
 from .animations import DoomFire, MatrixRain
 from .format import fat_bytes
 from .nodes_table import NodesSummary
@@ -523,6 +524,15 @@ class OverviewPanel(Widget):
     # ── populate ─────────────────────────────────────────────
 
     def _populate(self) -> None:
+        # Phase 4d.2-E step 2.5: time the populate path. This mounts
+        # NodesSummary + HomeStorage + CompactJobs + UtilizationPanel +
+        # ascii fresh each call, so it's the closest analogue we have
+        # to a "lazy mount" cost. Triggered on every layout-changing
+        # event (resize, util-fit flip).
+        with perf_block("layout", "overview_populate"):
+            self._populate_impl()
+
+    def _populate_impl(self) -> None:
         main = self.query_one("#main", Vertical)
         main.remove_children()
         ascii_row = self.query_one("#ascii_row", Vertical)

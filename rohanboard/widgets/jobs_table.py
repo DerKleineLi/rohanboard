@@ -16,6 +16,7 @@ from textual.widgets.data_table import RowKey
 
 from ..collectors.models import Job, Snapshot
 from ..filter import make_matcher
+from ..perf import perf_block, perf_enabled, perf_log
 from .sortable_header import SortableHeader
 
 
@@ -442,28 +443,33 @@ class JobsTable(Widget):
     def watch_mode(self, _old: str, new: str) -> None:
         if not self.is_mounted:
             return
-        active_pill = self.query_one("#pill_active", Static)
-        recent_pill = self.query_one("#pill_recent", Static)
-        if new == "active":
-            active_pill.add_class("-active")
-            recent_pill.remove_class("-active")
-        else:
-            recent_pill.add_class("-active")
-            active_pill.remove_class("-active")
-        cols = _COLUMNS_ACTIVE if new == "active" else _COLUMNS_RECENT
-        self._rebuild_columns(cols)
-        # Rebuild the custom header for the new column set.
-        try:
-            hdr = self.query_one(SortableHeader)
-            hdr.remove()
-        except Exception:
-            pass
-        new_hdr = SortableHeader(list(cols))
-        self.query_one(Vertical).mount(new_hdr, before=self.query_one("#jobs_table_dt", DataTable))
-        new_hdr.bind_scroll_source(self.query_one("#jobs_table_dt", DataTable))
-        new_hdr.set_sort(self._sort_col, "free", self._sort_reverse)
-        if self._last_snapshot is not None:
-            self.update_snapshot(self._last_snapshot)
+        # Phase 4d.2-E step 2.5: this watcher runs on the sync click
+        # path — column rebuild + header remount + sync update_snapshot
+        # call. Time the whole thing so we can see if mode flip itself
+        # is the latency hotspot vs. the broadcast.
+        with perf_block("click", "mode_watcher", extra=f"new={new}"):
+            active_pill = self.query_one("#pill_active", Static)
+            recent_pill = self.query_one("#pill_recent", Static)
+            if new == "active":
+                active_pill.add_class("-active")
+                recent_pill.remove_class("-active")
+            else:
+                recent_pill.add_class("-active")
+                active_pill.remove_class("-active")
+            cols = _COLUMNS_ACTIVE if new == "active" else _COLUMNS_RECENT
+            self._rebuild_columns(cols)
+            # Rebuild the custom header for the new column set.
+            try:
+                hdr = self.query_one(SortableHeader)
+                hdr.remove()
+            except Exception:
+                pass
+            new_hdr = SortableHeader(list(cols))
+            self.query_one(Vertical).mount(new_hdr, before=self.query_one("#jobs_table_dt", DataTable))
+            new_hdr.bind_scroll_source(self.query_one("#jobs_table_dt", DataTable))
+            new_hdr.set_sort(self._sort_col, "free", self._sort_reverse)
+            if self._last_snapshot is not None:
+                self.update_snapshot(self._last_snapshot)
 
     def action_toggle_mode(self) -> None:
         self.mode = "recent" if self.mode == "active" else "active"
@@ -588,8 +594,17 @@ class JobsTable(Widget):
             self._row_keys.clear()
             self._applied_sort = current_sort
 
+        # Phase 4d.2-E step 2.5: per-chunk telemetry — see same block in
+        # `update_snapshot` for the rationale. Both paths share the loop
+        # shape; both emit `filter/<path>_<mode>` rows so the breakdown
+        # awk can split them.
         new_keys: set[str] = set()
         mut_count = 0
+        chunks = 0
+        max_gap_ms = 0.0
+        first_50_ms: float | None = None
+        rebuild_t0 = time.perf_counter() if perf_enabled() else 0.0
+        last_yield = rebuild_t0
         for j in jobs:
             row = self._row_for_job(j, self.mode)
             new_keys.add(j.job_id)
@@ -605,7 +620,16 @@ class JobsTable(Widget):
                 rk = table.add_row(*values, key=j.job_id)
                 self._row_keys[j.job_id] = rk
             mut_count += 1
+            if perf_enabled() and first_50_ms is None and mut_count >= 50:
+                first_50_ms = (time.perf_counter() - rebuild_t0) * 1000
             if mut_count % 50 == 0:
+                if perf_enabled():
+                    now = time.perf_counter()
+                    gap = (now - last_yield) * 1000
+                    if gap > max_gap_ms:
+                        max_gap_ms = gap
+                    last_yield = now
+                chunks += 1
                 await asyncio.sleep(0)
 
         for stale_key in list(self._row_keys.keys() - new_keys):
@@ -616,7 +640,28 @@ class JobsTable(Widget):
             del self._row_keys[stale_key]
             mut_count += 1
             if mut_count % 50 == 0:
+                if perf_enabled():
+                    now = time.perf_counter()
+                    gap = (now - last_yield) * 1000
+                    if gap > max_gap_ms:
+                        max_gap_ms = gap
+                    last_yield = now
+                chunks += 1
                 await asyncio.sleep(0)
+
+        if perf_enabled():
+            total_ms = (time.perf_counter() - rebuild_t0) * 1000
+            if first_50_ms is not None:
+                extra = (
+                    f"rows={len(jobs)} chunks={chunks} "
+                    f"max_gap_ms={max_gap_ms:.1f} first_50_ms={first_50_ms:.1f}"
+                )
+            else:
+                extra = (
+                    f"rows={len(jobs)} chunks={chunks} "
+                    f"max_gap_ms={max_gap_ms:.1f} first_50_ms=NA"
+                )
+            perf_log("filter", f"apply_filter_async_{self.mode}", total_ms, extra=extra)
 
         if not jobs:
             n_cols = len(self._current_columns)
@@ -766,8 +811,17 @@ class JobsTable(Widget):
             self._row_keys.clear()
             self._applied_sort = current_sort
 
+        # Phase 4d.2-E step 2.5: per-chunk telemetry. Track when the
+        # FIRST 50 rows are visible (the user's "first content"
+        # threshold) AND the max yield-gap (longest stretch the loop
+        # ran without yielding to input dispatch).
         new_keys: set[str] = set()
         mut_count = 0
+        chunks = 0
+        max_gap_ms = 0.0
+        first_50_ms: float | None = None
+        rebuild_t0 = time.perf_counter() if perf_enabled() else 0.0
+        last_yield = rebuild_t0
         for j in jobs:
             row = self._row_for_job(j, self.mode)
             new_keys.add(j.job_id)
@@ -783,7 +837,16 @@ class JobsTable(Widget):
                 rk = table.add_row(*values, key=j.job_id)
                 self._row_keys[j.job_id] = rk
             mut_count += 1
+            if perf_enabled() and first_50_ms is None and mut_count >= 50:
+                first_50_ms = (time.perf_counter() - rebuild_t0) * 1000
             if mut_count % 50 == 0:
+                if perf_enabled():
+                    now = time.perf_counter()
+                    gap = (now - last_yield) * 1000
+                    if gap > max_gap_ms:
+                        max_gap_ms = gap
+                    last_yield = now
+                chunks += 1
                 await asyncio.sleep(0)
 
         for stale_key in list(self._row_keys.keys() - new_keys):
@@ -794,7 +857,28 @@ class JobsTable(Widget):
             del self._row_keys[stale_key]
             mut_count += 1
             if mut_count % 50 == 0:
+                if perf_enabled():
+                    now = time.perf_counter()
+                    gap = (now - last_yield) * 1000
+                    if gap > max_gap_ms:
+                        max_gap_ms = gap
+                    last_yield = now
+                chunks += 1
                 await asyncio.sleep(0)
+
+        if perf_enabled():
+            total_ms = (time.perf_counter() - rebuild_t0) * 1000
+            if first_50_ms is not None:
+                extra = (
+                    f"rows={len(jobs)} chunks={chunks} "
+                    f"max_gap_ms={max_gap_ms:.1f} first_50_ms={first_50_ms:.1f}"
+                )
+            else:
+                extra = (
+                    f"rows={len(jobs)} chunks={chunks} "
+                    f"max_gap_ms={max_gap_ms:.1f} first_50_ms=NA"
+                )
+            perf_log("filter", f"update_snapshot_{self.mode}", total_ms, extra=extra)
 
         if not jobs:
             n_cols = len(self._current_columns)
