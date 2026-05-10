@@ -111,9 +111,24 @@ class CompactJobs(Widget):
     def update_snapshot(self, snap: Snapshot) -> None:
         body = self.query_one("#body", Static)
         jobs = snap.jobs
-        self.query_one("#title", Static).update(
-            f"Active jobs  [dim]({len(jobs)})[/dim]"
-        )
+        # Phase 4d.2-D: snapshot.jobs is now ALL users — apply the same
+        # client-side `mine_only` filter the JobsTable does so the
+        # Overview tab's count + body match the "your active jobs"
+        # semantic the user expects. Cold-start (cluster_user=="")
+        # falls through to "show everything" — same conservative
+        # default as JobsTable.
+        try:
+            mine_only = bool(getattr(self.app, "mine_only", True))
+        except Exception:
+            mine_only = True
+        if mine_only and snap.cluster_user:
+            jobs = [j for j in jobs if j.user == snap.cluster_user]
+        title = "Active jobs"
+        if mine_only and snap.cluster_user:
+            title += f"  [dim]({len(jobs)} · {snap.cluster_user})[/dim]"
+        else:
+            title += f"  [dim]({len(jobs)})[/dim]"
+        self.query_one("#title", Static).update(title)
         if not jobs:
             body.update("[dim italic]no active jobs[/dim italic]")
             return
@@ -335,7 +350,19 @@ class OverviewPanel(Widget):
         self._relayout()
 
     def update_snapshot(self, snap: Snapshot) -> None:
-        self._job_count = len(snap.jobs)
+        # Phase 4d.2-D: snapshot.jobs is all-users now. The layout
+        # decision (`_jobs_natural`) needs the count of what CompactJobs
+        # will ACTUALLY render — i.e. the mine-filtered count when the
+        # user has mine_only on. Mirror CompactJobs.update_snapshot's
+        # filter so the right-column natural height matches the body.
+        try:
+            mine_only = bool(getattr(self.app, "mine_only", True))
+        except Exception:
+            mine_only = True
+        if mine_only and snap.cluster_user:
+            self._job_count = sum(1 for j in snap.jobs if j.user == snap.cluster_user)
+        else:
+            self._job_count = len(snap.jobs)
         # re-layout may be needed if util fit-check flipped
         self._relayout()
         self._push_snapshot()

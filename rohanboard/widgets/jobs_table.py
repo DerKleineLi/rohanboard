@@ -569,6 +569,17 @@ class JobsTable(Widget):
 
         matcher = make_matcher(self.filter_text, list(_JOB_FILTER_DEFAULT_FIELDS))
         jobs = [j for j in jobs if matcher(_job_filter_record(j))]
+        # Phase 4d.2-D: client-side mine_only filter. Read from
+        # `app.mine_only` (the App's reactive — single source of truth)
+        # so flipping it via any path triggers consistent filtering
+        # across JobsTable + CompactJobs. cluster_user is stamped on
+        # each snapshot by app._refresh_all (resolved REMOTE whoami).
+        # On cold start (cluster_user == "") fall through to "show
+        # everything" — better than blocking the table behind an async
+        # whoami probe.
+        mine_only = self._app_mine_only()
+        if mine_only and snapshot.cluster_user:
+            jobs = [j for j in jobs if j.user == snapshot.cluster_user]
         jobs.sort(key=lambda j: _sort_value(j, self._sort_col), reverse=self._sort_reverse)
 
         current_sort = (self._sort_col, self._sort_reverse)
@@ -609,7 +620,16 @@ class JobsTable(Widget):
 
         if not jobs:
             n_cols = len(self._current_columns)
-            table.add_row(Text(f"— no jobs match '{self.filter_text}' —", style="dim italic"),
+            if self.filter_text:
+                empty_msg = (
+                    f"— no jobs match '{self.filter_text}'"
+                    f"{' (mine only)' if mine_only and snapshot.cluster_user else ''} —"
+                )
+            elif mine_only and snapshot.cluster_user:
+                empty_msg = f"— no active jobs for {snapshot.cluster_user} —"
+            else:
+                empty_msg = "— no active jobs —"
+            table.add_row(Text(empty_msg, style="dim italic"),
                           *([""] * (n_cols - 1)))
 
         try:
@@ -625,6 +645,16 @@ class JobsTable(Widget):
         # input drops.
         return
 
+    def _app_mine_only(self) -> bool:
+        """Phase 4d.2-D: read mine_only from the App (single source of
+        truth). Falls back to the local JobsTable reactive if the App
+        attribute isn't available (test harnesses that mount the
+        widget without an App)."""
+        try:
+            return bool(self.app.mine_only)          # type: ignore[attr-defined]
+        except Exception:
+            return self.mine_only
+
     def watch_mine_only(self, _old: bool, new: bool) -> None:
         if not self.is_mounted:
             return
@@ -633,13 +663,13 @@ class JobsTable(Widget):
             pill.add_class("-active")
         else:
             pill.remove_class("-active")
-        # Mine-only is applied server-side via `-u $USER` — flip the App
-        # flag and kick a fresh fetch. _refresh_all is @work-decorated on
-        # the App; calling it spawns the worker (and cancels any prior
-        # in-flight tick via exclusive=True, group="collect").
+        # Phase 4d.2-D: propagate the JobsTable's local state to
+        # App.mine_only (which is a reactive the App watches). The App's
+        # `watch_mine_only` re-broadcasts the cached snapshot to every
+        # widget so this JobsTable AND CompactJobs repaint with the new
+        # filter at the same moment. NO refetch.
         try:
             self.app.mine_only = new                 # type: ignore[attr-defined]
-            self.app._refresh_all()                  # type: ignore[attr-defined]
         except Exception:
             pass
 
@@ -722,8 +752,12 @@ class JobsTable(Widget):
 
         matcher = make_matcher(self.filter_text, list(_JOB_FILTER_DEFAULT_FIELDS))
         jobs = [j for j in jobs if matcher(_job_filter_record(j))]
-        # (Mine-only is applied server-side via `-u $USER` in the collector,
-        # driven by App.mine_only.  No client-side filter here.)
+        # Phase 4d.2-D: client-side mine_only — see `_apply_filter_async`
+        # for the same predicate; both paths must filter identically so
+        # the table content matches whichever rebuild path landed last.
+        mine_only = self._app_mine_only()
+        if mine_only and snapshot.cluster_user:
+            jobs = [j for j in jobs if j.user == snapshot.cluster_user]
         jobs.sort(key=lambda j: _sort_value(j, self._sort_col), reverse=self._sort_reverse)
 
         current_sort = (self._sort_col, self._sort_reverse)
@@ -764,7 +798,16 @@ class JobsTable(Widget):
 
         if not jobs:
             n_cols = len(self._current_columns)
-            table.add_row(Text(f"— no jobs match '{self.filter_text}' —", style="dim italic"),
+            if self.filter_text:
+                empty_msg = (
+                    f"— no jobs match '{self.filter_text}'"
+                    f"{' (mine only)' if mine_only and snapshot.cluster_user else ''} —"
+                )
+            elif mine_only and snapshot.cluster_user:
+                empty_msg = f"— no active jobs for {snapshot.cluster_user} —"
+            else:
+                empty_msg = "— no active jobs —"
+            table.add_row(Text(empty_msg, style="dim italic"),
                           *([""] * (n_cols - 1)))
 
         try:
