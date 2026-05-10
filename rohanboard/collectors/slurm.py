@@ -257,16 +257,28 @@ def _parse_node_block(block: str) -> Node | None:
     except ValueError:
         cpu_load = None
 
+    # LRZ scontrol emits `FreeMem=N/A` (and occasionally other numeric
+    # fields) on down / not-responding nodes. Treat any non-integer value
+    # as 0 so a single misbehaving node doesn't tank the entire snapshot
+    # via `invalid literal for int() with base 10: 'N/A'`. The downstream
+    # widgets read these via the Node dataclass and a 0 here means "this
+    # node contributes no capacity" — accurate for a DOWN node anyway.
+    def _safe_int(key: str) -> int:
+        try:
+            return int(fields.get(key, 0))
+        except ValueError:
+            return 0
+
     return Node(
         name=fields["NodeName"],
         partitions=partitions,
         state=fields.get("State", "UNKNOWN"),
-        cpu_total=int(fields.get("CPUTot", 0)),
-        cpu_alloc=int(fields.get("CPUAlloc", 0)),
+        cpu_total=_safe_int("CPUTot"),
+        cpu_alloc=_safe_int("CPUAlloc"),
         cpu_load=cpu_load,
-        mem_total_mb=int(fields.get("RealMemory", 0)),
-        mem_alloc_mb=int(fields.get("AllocMem", 0)),
-        mem_free_mb=int(fields.get("FreeMem", 0)),
+        mem_total_mb=_safe_int("RealMemory"),
+        mem_alloc_mb=_safe_int("AllocMem"),
+        mem_free_mb=_safe_int("FreeMem"),
         gpus=gpus,
         features=features,
     )

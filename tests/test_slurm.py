@@ -69,6 +69,32 @@ def _one_node(fixture: str):
     return nodes[0]
 
 
+def test_parse_node_tolerates_na_in_numeric_fields():
+    """LRZ scontrol emits `FreeMem=N/A` on DOWN / NOT_RESPONDING nodes.
+    The parser must absorb that as 0, not raise ValueError that kills
+    the whole snapshot. Real-world repro: rohanboard pointed at LRZ
+    showed "Cluster totals: ⚠ invalid literal for int() with base 10:
+    'N/A'" until the safe-int wrapper landed.
+    """
+    block = (
+        "NodeName=lrz-down-001 Arch=x86_64 CoresPerSocket=24\n"
+        "   CPUAlloc=0 CPUEfctv=92 CPUTot=96 CPULoad=N/A\n"
+        "   AvailableFeatures=A100-80GB\n"
+        "   ActiveFeatures=A100-80GB\n"
+        "   Gres=gpu:4(S:0-1)\n"
+        "   RealMemory=1031700 AllocMem=0 FreeMem=N/A Sockets=2 Boards=1\n"
+        "   State=DOWN+NOT_RESPONDING ThreadsPerCore=2 TmpDisk=0 Weight=1\n"
+        "   Partitions=lrz-hgx-a100-80x4\n"
+        "   AllocTRES=\n"
+    )
+    nodes = parse_scontrol_show_node(block)
+    assert len(nodes) == 1
+    n = nodes[0]
+    assert n.name == "lrz-down-001"
+    assert n.cpu_load is None
+    assert n.mem_free_mb == 0   # FreeMem=N/A → 0
+
+
 def test_parse_node_unknown_kind_no_fallback():
     """A kind that's NOT in `_KIND_VRAM_FALLBACK` and lacks hyphenated
     AvailableFeatures must keep `vram=None` — fallback is opt-in per kind.
