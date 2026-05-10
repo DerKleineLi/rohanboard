@@ -125,3 +125,38 @@ widgets = ["jobs_table"]
     cfg = load(_write(tmp_path, body))
     assert len(cfg.layout.tabs) == 1
     assert cfg.layout.tabs[0].id == "jobs"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Project-shipped configs — `configs/lrz.toml` (Phase 4d.2-prereq)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_lrz_config_loads():
+    """`configs/lrz.toml` parses cleanly and carries the LRZ-specific
+    knobs from `cluster_lrz.md`: ssh:lrz exec, df-only storage, bumped
+    refresh interval to absorb ProxyJump cold-connect.
+    """
+    project_root = Path(__file__).resolve().parent.parent
+    cfg = load(project_root / "configs" / "lrz.toml")
+    assert cfg.exec_spec == "ssh:lrz"
+    # users explicitly set to the LRZ user (NOT "self" — would resolve to
+    # WSL's $USER and miss the LRZ user's jobs).
+    assert cfg.slurm.users == ["di35dob"]
+    # ProxyJump cold ≈ 10.5 s; default 5 s would cancel mid-handshake.
+    assert cfg.refresh.slurm_jobs >= 15
+    # Storage entries: 3 df entries, no quota (LRZ login lacks the binary).
+    labels = {e.label: e for e in cfg.storage_entries}
+    assert "home" in labels and labels["home"].kind == "df"
+    assert labels["home"].path == "/dss/dsshome1"
+    assert any("scratch" in lbl.lower() for lbl in labels), (
+        f"expected a scratch entry, got labels {list(labels)}"
+    )
+    assert any("mcml" in lbl.lower() for lbl in labels)
+    assert all(e.kind == "df" for e in cfg.storage_entries), (
+        "LRZ login lacks `quota`; all storage entries must be kind=df"
+    )
+    # No [layout] / [overview] in the file → rohan-style defaults inherit.
+    tabs = {t.id: t for t in cfg.layout.tabs}
+    assert tabs["overview"].widgets == ["overview_panel"]
+    assert tabs["nodes"].widgets == ["nodes_summary", "nodes_table"]

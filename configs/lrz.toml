@@ -1,0 +1,49 @@
+# rohanboard config for LRZ AI Systems (BayernKI).
+#
+# Usage:
+#   uv run rohanboard --config configs/lrz.toml
+#
+# Notes (per ~/.claude/projects/-home-hli/memory/cluster_lrz.md):
+# - exec MUST be ssh:lrz; the alias is configured in ~/.ssh/config with
+#   ProxyJump through lrzlogin (cold connection ≈ 10.5 s).
+# - LRZ login node does NOT have the `quota` binary. Use kind = "df" for
+#   home + scratch + MCML; the numbers reflect filesystem-aggregate
+#   capacity, not per-user usage (LRZ doesn't expose per-user quotas
+#   via a CLI we can call from the login node).
+# - Storage paths use the FILESYSTEM MOUNT roots (e.g. /dss/dsshome1),
+#   not the user-specific subdirs. df -B1 resolves either to the same
+#   filesystem row, but the v2 combined collector's label-override
+#   mapping requires the config path to match df's "Mounted on" column
+#   exactly — and df reports the mount root, not the subpath.
+# - users = ["di35dob"] is the LRZ username (different from WSL's $USER
+#   "hli"). "self" would resolve to $USER on the WSL side and miss the
+#   LRZ user's jobs.
+# - [refresh] slurm_jobs bumped to 15 s so the first refresh tick doesn't
+#   cancel mid-handshake on the cold ProxyJump (~10.5 s).
+# - No [layout] / [overview] — Phase 4d.1 Task B made the rohan-style
+#   layout the default for any single-cluster TOML.
+
+exec = "ssh:lrz"
+
+[slurm]
+users = ["di35dob"]
+
+[refresh]
+slurm_jobs = 15
+slurm_nodes = 30
+storage = 60
+
+[[storage.entries]]
+label = "home"
+kind = "df"
+path = "/dss/dsshome1"
+
+[[storage.entries]]
+label = "scratch ($MCMLSCRATCH)"
+kind = "df"
+path = "/dss/mcmlscratch"
+
+[[storage.entries]]
+label = "MCML DSS"
+kind = "df"
+path = "/dss/dssmcmlfs01"
