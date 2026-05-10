@@ -184,10 +184,73 @@ source = "storage_prefix"
         load(_write(tmp_path, body))
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Phase 4d.2-C — `group` field + kind="dssusrinfo" config validation
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_storage_entry_group_field_loads(tmp_path):
+    """`group` on [[storage.entries]] propagates through to the
+    StorageEntryConfig — used by the StoragePanel classifier to bucket
+    the entry into a render group (home / scratch / persistent / …)."""
+    body = """
+[[storage.entries]]
+label = "scratch"
+kind = "df"
+path = "/dss/mcmlscratch"
+group = "scratch"
+"""
+    cfg = load(_write(tmp_path, body))
+    assert len(cfg.storage_entries) == 1
+    assert cfg.storage_entries[0].group == "scratch"
+
+
+def test_dssusrinfo_requires_mode(tmp_path):
+    body = """
+[[storage.entries]]
+label = "home"
+kind = "dssusrinfo"
+path = "/dss/dsshome1"
+"""
+    with pytest.raises(ValueError, match="requires mode in"):
+        load(_write(tmp_path, body))
+
+
+def test_dssusrinfo_container_mode_requires_container(tmp_path):
+    body = """
+[[storage.entries]]
+label = "MCML DSS"
+kind = "dssusrinfo"
+mode = "container"
+path = "/dss/dssmcmlfs01"
+"""
+    with pytest.raises(ValueError, match="requires `container`"):
+        load(_write(tmp_path, body))
+
+
+def test_dssusrinfo_home_mode_loads_without_container(tmp_path):
+    """mode='home' doesn't need a `container` — `dssusrinfo dsshome`
+    is implicitly user-scoped."""
+    body = """
+[[storage.entries]]
+label = "home"
+kind = "dssusrinfo"
+mode = "home"
+path = "/dss/dsshome1"
+group = "home"
+"""
+    cfg = load(_write(tmp_path, body))
+    assert cfg.storage_entries[0].kind == "dssusrinfo"
+    assert cfg.storage_entries[0].mode == "home"
+    assert cfg.storage_entries[0].container is None
+    assert cfg.storage_entries[0].group == "home"
+
+
 def test_lrz_config_loads():
     """`configs/lrz.toml` parses cleanly and carries the LRZ-specific
-    knobs from `cluster_lrz.md`: ssh:lrz exec, df-only storage, bumped
-    refresh interval to absorb ProxyJump cold-connect.
+    knobs from `cluster_lrz.md`: ssh:lrz exec, dssusrinfo + df storage,
+    bumped refresh interval to absorb ProxyJump cold-connect, explicit
+    `group` keys for the panel render order.
     """
     project_root = Path(__file__).resolve().parent.parent
     cfg = load(project_root / "configs" / "lrz.toml")
@@ -197,17 +260,30 @@ def test_lrz_config_loads():
     assert cfg.slurm.users == ["self"]
     # ProxyJump cold ≈ 10.5 s; default 5 s would cancel mid-handshake.
     assert cfg.refresh.slurm_jobs >= 15
-    # Storage entries: 3 df entries, no quota (LRZ login lacks the binary).
+    # Storage entries: home (dssusrinfo dsshome) + scratch (df) + MCML DSS
+    # (dssusrinfo container_usage). LRZ login lacks `quota`; per-user
+    # numbers come from dssusrinfo where it applies.
     labels = {e.label: e for e in cfg.storage_entries}
-    assert "home" in labels and labels["home"].kind == "df"
+    assert "home" in labels
+    assert labels["home"].kind == "dssusrinfo"
+    assert labels["home"].mode == "home"
+    assert labels["home"].group == "home"
     assert labels["home"].path == "/dss/dsshome1"
-    assert any("scratch" in lbl.lower() for lbl in labels), (
-        f"expected a scratch entry, got labels {list(labels)}"
-    )
-    assert any("mcml" in lbl.lower() for lbl in labels)
-    assert all(e.kind == "df" for e in cfg.storage_entries), (
-        "LRZ login lacks `quota`; all storage entries must be kind=df"
-    )
+    scratch_entries = [e for lbl, e in labels.items() if "scratch" in lbl.lower()]
+    assert scratch_entries, f"expected a scratch entry, got labels {list(labels)}"
+    assert scratch_entries[0].kind == "df"
+    assert scratch_entries[0].group == "scratch"
+    mcml_dss = [
+        e for lbl, e in labels.items()
+        if "mcml" in lbl.lower() and "scratch" not in lbl.lower()
+    ]
+    assert mcml_dss, f"expected an MCML DSS entry, got labels {list(labels)}"
+    assert mcml_dss[0].kind == "dssusrinfo"
+    assert mcml_dss[0].mode == "container"
+    assert mcml_dss[0].container == "pn25pi-dss-0000"
+    assert mcml_dss[0].group == "persistent"
+    # No `quota` kind (LRZ login lacks the binary).
+    assert not any(e.kind == "quota" for e in cfg.storage_entries)
     # No [layout] / [overview] in the file → rohan-style defaults inherit.
     tabs = {t.id: t for t in cfg.layout.tabs}
     assert tabs["overview"].widgets == ["overview_panel"]

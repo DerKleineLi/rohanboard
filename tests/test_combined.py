@@ -171,6 +171,54 @@ async def test_fetch_combined_makes_exactly_one_channel_per_tick():
     assert raw.df == ""
 
 
+async def test_fetch_combined_dssusrinfo_section_uses_inner_subshell():
+    """When dssusrinfo_subcommands has 2+ entries, the section value
+    must wrap them in an inner `( ... )` subshell so the outer `> FILE`
+    redirect captures BOTH outputs. Without the wrap, only the LAST
+    subcommand's stdout reaches the dump and the home block gets
+    silently dropped — observed live on LRZ 2026-05-10."""
+    fake = _FakeExecutor(response=(0, "", ""))
+    await fetch_combined(
+        fake,
+        quota_user=None,
+        df_explicit_paths=[],
+        df_prefix_globs=[],
+        squeue_format="x",
+        squeue_users=None,
+        sacct_format="y",
+        sacct_starttime="now",
+        sacct_users=None,
+        dssusrinfo_subcommands=["dsshome", "container_usage"],
+    )
+    script = fake.calls[0][0][2]
+    # Inner subshell wraps the chain; the outer template applies the
+    # redirect to that whole subshell.
+    assert "( dssusrinfo dsshome; dssusrinfo container_usage )" in script
+    # Plain `dssusrinfo dsshome; dssusrinfo container_usage > $T/...`
+    # without the inner parens MUST NOT be present — that's the bug shape.
+    assert "dssusrinfo dsshome; dssusrinfo container_usage > " not in script
+
+
+async def test_fetch_combined_dssusrinfo_section_skipped_when_empty():
+    """No dssusrinfo entries → no dssusrinfo section in the script
+    (rohan and other non-LRZ clusters lack the binary)."""
+    fake = _FakeExecutor(response=(0, "", ""))
+    await fetch_combined(
+        fake,
+        quota_user="hli",
+        df_explicit_paths=[],
+        df_prefix_globs=["/cluster/*"],
+        squeue_format="x",
+        squeue_users=None,
+        sacct_format="y",
+        sacct_starttime="now",
+        sacct_users=None,
+        dssusrinfo_subcommands=None,
+    )
+    script = fake.calls[0][0][2]
+    assert "dssusrinfo" not in script
+
+
 async def test_fetch_combined_quota_skipped_when_no_user():
     """quota_user=None → the quota section is dropped from the script
     entirely (no spurious `quota -u ` invocation)."""
