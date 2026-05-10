@@ -22,6 +22,13 @@ This file is the project-local runbook for `rohanboard` on `clean-reimpl-v2`. Re
   - `c6d530e` cherry-pick of `4cde47a` — MIG-node aggregation at node level (no fictitious negative free counts).
   - `54377ef` cherry-pick of `9f17161` — `_norm_kind` canonical formatter (uppercases non-MIG kinds, preserves MIG profiles).
   - `afdf878` cherry-pick of `3ee48b0` — static VRAM fallback `_KIND_VRAM_FALLBACK` for clusters without hyphenated `AvailableFeatures`.
+- **Phase 4d.2-A** (landed 2026-05-10): three small fixes that unblocked LRZ + a fresh `configs/lrz.toml`.
+  - `2513cb3` `parse_df_multi` dedupes by source, not mount path (LRZ `home` and `scratch` share path `/dss/dsshome1` → were collapsing into one row).
+  - `36ec185` chunked `update_snapshot` keeps the UI responsive during broadcast (LRZ's slow first paint was starving keystroke dispatch).
+  - `ad4f38d` `parse_node` tolerates `N/A` in numeric fields (LRZ DOWN nodes were crashing the parser).
+  - `f925402` `configs/lrz.toml` — `exec = "ssh:lrz"`, df-only storage (no `quota`), bumped first-refresh interval for the cold-ProxyJump ≈ 10.5 s window.
+  - `0897219` `users = ["self"]` resolved by the executor's `whoami` (so a config can be `users = ["self"]` and Just Work on whichever cluster).
+- **Phase 4d.2-B** (landed 2026-05-10): generic `[[nodes_table.columns]]` schema — per-node storage columns are no longer hardcoded ssd/hdd in `nodes_table.py`. Each cluster declares its own columns in TOML; the only handler today is `source = "storage_prefix"` (matches snapshot.storage entries with path `<prefix>/<node>`). LRZ omits the section entirely → no SSD/HDD columns. Rohan declares two columns (`/cluster`, `/cluster_HDD`) → identical layout to before. Filter expressions auto-pick up `<col.id>_free / _used / _total` per declared column.
 - **Phase 4e+** (not yet started): multi-cluster SSH wiring.
 
 ## Layout defaults
@@ -36,13 +43,15 @@ Cluster-specific TOMLs (e.g. `/tmp/wsl_single_v2_4c_ssh_config.toml`) carry only
 
 ## Smoke-test pane
 
-The canonical Phase 4c+ smoke pane is `rohan:rb-v2-4c-ssh` (NOT `rohan:rohanboard-wsl` — that one is the older `clean-reimpl` multi-cluster build with `c Cycle cluster` binding).
+The canonical Phase 4c+ smoke pane is `rohan:rb-v2-4c-ssh` (NOT `rohan:rohanboard-wsl` — that one is the older `clean-reimpl` multi-cluster build with `c Cycle cluster` binding). LRZ smoke runs in a separate window `rohan:rb-v2-lrz` so it doesn't clobber the rohan pane.
 
 Restart cleanly via `tmux respawn-pane -k`:
 
 ```
 tmux respawn-pane -k -t rohan:rb-v2-4c-ssh \
-  'cd ~/workspace/rohanboard-local && uv run rohanboard --config /tmp/wsl_single_v2_4c_ssh_config.toml'
+  'cd ~/workspace/rohanboard-local && uv run rohanboard --config configs/rohan.toml'
+tmux respawn-pane -k -t rohan:rb-v2-lrz \
+  'cd ~/workspace/rohanboard-local && uv run rohanboard --config configs/lrz.toml'
 ```
 
 (Per `tmux_ops.md` §from feedback_tui_restart_pattern — `respawn-pane` is the clean restart, NOT send-keys + q.)
@@ -51,7 +60,7 @@ After respawn, capture-pane after ~10 s to confirm: cluster name in header, Stor
 
 ## Testing
 
-- **Unit + Pilot tests:** `uv run pytest tests/`. As of 2026-05-08: 33/33 passing.
+- **Unit + Pilot tests:** `uv run pytest tests/`. As of 2026-05-10: 71/71 passing.
 - **Filter-drop regression test:** `tests/test_input_drops.py` exercises both 600 ms (synchronous-blocker) and 50 ms (debounce-coalesce) rhythms on JobsTable and NodesTable filters. The 600 ms test is the canonical drops repro per `~/.claude/projects/-home-hli/memory/rohanboard.md` §"Filter-bar character-drop variant".
 - **Live tmux drops test:** see the memory file for byte-offset oracle / SGR mouse-click recipes if you need to repro on a real terminal.
 
@@ -61,3 +70,8 @@ After respawn, capture-pane after ~10 s to confirm: cluster name in header, Stor
 - **Filter Input id is `"filter"`, not `"filter-input"`** — both `JobsTable` and `NodesTable` mount their filter Input with `id="filter"`. Test code that does `pilot.click("#filter-input")` will silently fail. Query within the active widget: `app.query_one(JobsTable).query_one("#filter", Input)`.
 - **`l` is bound to `action_jobs_tail_log` on the Jobs tab** (scoped via `App.check_action`). Test strings containing `q`/`r`/`l` are unsafe if focus drifts off the filter Input. Test string `testhello` contains `l` — Pilot keeps focus stable so it's fine in-process, but be cautious in tmux real-terminal tests.
 - **`watch_filter_text` is now a no-op** — debounce in `on_input_changed` drives the rebuild via `run_worker(_apply_filter_async, exclusive=True)`. The reactive write still fires the watcher, but the watcher does nothing; do NOT re-add a synchronous rebuild there.
+- **Per-node Nodes-tab columns are config-driven (Phase 4d.2-B)** — `[[nodes_table.columns]]` in the cluster TOML declares them. Today the only `source` is `"storage_prefix"`, which matches `snapshot.storage` entries whose path is `<prefix>/<node>`. To add a new source: add a branch in `NodesTable._build_extras_by_id` + (if not a StorageEntry) `NodesTable._row_for_node`; the config schema (`NodesTableColumnConfig`) is already extensible. The filter help modal `NODES_FILTER_SPEC` still hardcodes ssd/hdd as example numeric fields; harmless on LRZ (those tokens just match nothing) but a small UX wart for non-rohan clusters.
+
+## Known follow-ups (planned but not yet implemented)
+
+- **JobsTable should show "loading…" placeholder before the first parse completes** (especially on LRZ where parsing is slow at `mine_only=False`). Currently the empty state is indistinguishable from "no jobs found", confusing the user during the cold-tick window. Discriminate via a snapshot field like `snap.jobs_loaded: bool` (default False until first successful parse) and render a "loading…" row in the DataTable while False. Same treatment for NodesTable + StoragePanel if any of them have observably-slow first ticks. Surfaced 2026-05-10 by the user after watching LRZ first paint.
