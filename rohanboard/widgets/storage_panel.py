@@ -14,6 +14,11 @@ from .format import fat_bytes
 
 
 def _classify(entry: StorageEntry) -> str:
+    # Explicit per-entry group from TOML wins over the path-based
+    # heuristic. Lets non-rohan clusters declare scratch / persistent
+    # groups (Phase 4d.2-C) without relying on path matching.
+    if entry.group:
+        return entry.group
     if entry.source == "quota":
         return "home"
     p = entry.path or ""
@@ -130,10 +135,12 @@ class StorageBar(Widget):
 # ──────────────────────────────────────────────────────────────────────────
 
 _GROUP_TITLES = {
-    "home": "Home",
-    "ssd":  "SSD  /cluster",
-    "hdd":  "HDD  /cluster_HDD",
-    "other": "Other",
+    "home":       "Home",
+    "ssd":        "SSD  /cluster",
+    "hdd":        "HDD  /cluster_HDD",
+    "scratch":    "Scratch",
+    "persistent": "Persistent",
+    "other":      "Other",
 }
 
 
@@ -244,7 +251,11 @@ class StoragePanel(Widget):
     }
     """
 
-    GROUP_ORDER = ("home", "ssd", "hdd", "other")
+    # Group render order. Home first (most-relevant for the user), then
+    # rohan's per-node tiers (ssd/hdd), then LRZ-style high-level tiers
+    # (scratch is more transient than persistent so it sorts before),
+    # then any unclassified extras.
+    GROUP_ORDER = ("home", "ssd", "hdd", "scratch", "persistent", "other")
 
     def compose(self) -> ComposeResult:
         yield Static("Storage  [dim](green = free)[/dim]", classes="panel_title")
@@ -267,7 +278,14 @@ class StoragePanel(Widget):
         empty_msg.display = False
         grouped: dict[str, list[StorageEntry]] = {gid: [] for gid in self.GROUP_ORDER}
         for entry in snapshot.storage:
-            grouped[_classify(entry)].append(entry)
+            gid = _classify(entry)
+            # Defensive: an explicit `group` from TOML may name a group
+            # the panel doesn't render (typo, future group not yet in
+            # GROUP_ORDER). Bucket those into "other" so the entry still
+            # shows up rather than crashing the panel.
+            if gid not in grouped:
+                gid = "other"
+            grouped[gid].append(entry)
         for gid, entries in grouped.items():
             entries.sort(key=lambda e: e.label.lower())
             await self.query_one(f"#group_{gid}", StorageGroup).update_entries(entries)
