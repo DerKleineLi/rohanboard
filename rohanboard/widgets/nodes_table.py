@@ -101,23 +101,26 @@ def _mem_gib(mb: int) -> float:
     return mb / 1024
 
 
-def _storage_by_node(storage: list[StorageEntry]) -> dict[str, dict[str, StorageEntry]]:
-    out: dict[str, dict[str, StorageEntry]] = {}
+def _storage_by_node_for_prefix(
+    storage: list[StorageEntry], prefix: str
+) -> dict[str, StorageEntry]:
+    """Map node-name → StorageEntry for entries whose path is `<prefix>/<node>`.
+
+    Generic version of the old `_storage_by_node` — takes a single prefix
+    and returns one map per call. The Phase 4d.2-A.2 generic
+    [[nodes_table.columns]] config calls this once per declared column
+    (e.g. once for /cluster, once for /cluster_HDD).
+    """
+    out: dict[str, StorageEntry] = {}
+    p = prefix.rstrip("/")
     for e in storage:
-        p = (e.path or "").rstrip("/")
-        if not p:
+        path = (e.path or "").rstrip("/")
+        if not path.startswith(p + "/"):
             continue
-        if p.startswith("/cluster_HDD/"):
-            name = p[len("/cluster_HDD/"):]
-            kind = "hdd"
-        elif p.startswith("/cluster/"):
-            name = p[len("/cluster/"):]
-            kind = "ssd"
-        else:
+        tail = path[len(p) + 1:]
+        if not tail or "/" in tail:
             continue
-        if "/" in name:
-            continue
-        out.setdefault(name.lower(), {})[kind] = e
+        out[tail.lower()] = e
     return out
 
 
@@ -127,17 +130,23 @@ def _storage_cell(entry: StorageEntry | None) -> Text:
     return fat_bytes(entry.free_bytes, entry.used_bytes, entry.total_bytes)
 
 
-def _node_filter_record(n: Node, storage_map: dict[str, dict[str, StorageEntry]]) -> dict:
+def _node_filter_record(
+    n: Node,
+    extras_by_id: dict[str, dict[str, StorageEntry]],
+) -> dict:
     """Structured view of a node for use with the filter expressions.
 
     Sizes are exposed in **bytes** so filter values can use unit suffixes
     (e.g. `mem_free>=100G`, `ssd_free>=1T`).
+
+    `extras_by_id` is a `{column_id → {node_name → StorageEntry}}` map
+    built from the cfg.nodes_table.columns list (one inner dict per
+    storage_prefix-sourced column). For each column we expose
+    `<id>_free / <id>_used / <id>_total` so the filter expression
+    knows about user-declared columns.
     """
-    per = storage_map.get(n.name.lower(), {})
-    ssd = per.get("ssd")
-    hdd = per.get("hdd")
     MB = 1024 * 1024
-    return {
+    rec: dict = {
         "name":        n.name,
         "state":       n.state,
         "partitions":  ",".join(n.partitions),
@@ -151,13 +160,13 @@ def _node_filter_record(n: Node, storage_map: dict[str, dict[str, StorageEntry]]
         "mem_free":    (n.mem_total_mb - n.mem_alloc_mb) * MB,
         "mem_alloc":   n.mem_alloc_mb * MB,
         "mem_total":   n.mem_total_mb * MB,
-        "ssd_free":    ssd.free_bytes if ssd else 0,
-        "ssd_used":    ssd.used_bytes if ssd else 0,
-        "ssd_total":   ssd.total_bytes if ssd else 0,
-        "hdd_free":    hdd.free_bytes if hdd else 0,
-        "hdd_used":    hdd.used_bytes if hdd else 0,
-        "hdd_total":   hdd.total_bytes if hdd else 0,
     }
+    for col_id, by_node in extras_by_id.items():
+        e = by_node.get(n.name.lower())
+        rec[f"{col_id}_free"] = e.free_bytes if e else 0
+        rec[f"{col_id}_used"] = e.used_bytes if e else 0
+        rec[f"{col_id}_total"] = e.total_bytes if e else 0
+    return rec
 
 
 _NODE_FILTER_DEFAULT_FIELDS = ("name", "state", "partitions", "gpu_kind")
@@ -195,28 +204,18 @@ Examples:
 
 # (col_key, base label, expected max data width, kind).
 # The effective column width is max(label_len + 2 for arrow, data_width + 1).
+# Base columns — always rendered. Extra columns (SSD / HDD / future)
+# are appended per `cfg.nodes_table.columns` declarations at NodesTable
+# construction. See `Phase 4d.2-A.2` — opt-in via [[nodes_table.columns]].
 _NODE_COLUMNS_RAW: tuple[tuple[str, str, int, str], ...] = (
     ("name",       "Node",                        9, "simple"),   # "daidalos" = 8
     ("state",      "State",                      13, "simple"),   # "MIXED+PLANNED" = 13
     ("cpu",        "CPU (free/alloc/total)",     17, "triple"),   # "1376 / 432 / 1808"
     ("gpu",        "GPU (free/alloc/total)",     22, "triple"),   # "16 / 56 / 64 rtx_a6000"
     ("mem",        "Mem GiB (free/alloc/total)", 22, "triple"),   # "9593 / 6823 / 16415"
-    ("ssd",        "SSD (free/alloc/total)",     32, "triple"),   # per-value units: "289 GiB / 39.3 TiB / 41.7 TiB"
-    ("hdd",        "HDD (free/alloc/total)",     32, "triple"),
     ("partitions", "Partitions",                 15, "simple"),
 )
 
-
-def _sized_columns() -> list[tuple[str, str, int, str]]:
-    out = []
-    for key, label, data_w, kind in _NODE_COLUMNS_RAW:
-        # +2 for " ↑", +1 for a breathing column gap.
-        width = max(len(label) + 2, data_w + 1)
-        out.append((key, label, width, kind))
-    return out
-
-
-_NODE_COLUMNS = tuple(_sized_columns())
 
 _METRIC_CYCLE = ("free", "alloc", "total")
 
@@ -225,7 +224,7 @@ def _node_sort_key(
     node: Node,
     col: str,
     metric: str,
-    storage_map: dict[str, dict[str, StorageEntry]],
+    extras_by_id: dict[str, dict[str, StorageEntry]],
 ) -> tuple:
     name_lower = node.name.lower()
     if col == "name":
@@ -249,8 +248,9 @@ def _node_sort_key(
         total = node.mem_total_mb
         value = {"free": total - alloc, "alloc": alloc, "total": total}[metric]
         return (value, name_lower)
-    if col in ("ssd", "hdd"):
-        entry = storage_map.get(name_lower, {}).get(col)
+    # Configured extra column (storage_prefix-sourced).
+    if col in extras_by_id:
+        entry = extras_by_id[col].get(name_lower)
         if entry is None:
             return (float("-inf"), name_lower)
         value = {
@@ -360,7 +360,11 @@ class NodesTable(Widget):
     _sort_reverse: bool
     _applied_sort: tuple | None
 
-    def __init__(self, presets: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        presets: list[dict] | None = None,
+        extra_columns: "list | None" = None,
+    ) -> None:
         super().__init__()
         self._row_keys = {}
         self._last_snapshot = None
@@ -372,6 +376,28 @@ class NodesTable(Widget):
         # Phase 3.5 (filter input drop): ~150 ms debounce so a fast
         # typist's keystrokes coalesce into ONE DataTable rebuild.
         self._filter_debounce_timer = None
+        # Phase 4d.2-A.2: opt-in extra columns from cfg.nodes_table.columns.
+        # Each is a NodesTableColumnConfig (id, header, source, prefix, …).
+        # Today only source = "storage_prefix" is wired; future sources
+        # add a branch in `_extras_by_id` + `_row_for_node`.
+        self._extra_columns = list(extra_columns or [])
+        # Build the full column tuple = base + extras. Extras land BEFORE
+        # `partitions` so the layout reads "name | state | cpu | gpu | mem
+        # | <ssd> | <hdd> | partitions" — matches the legacy rohan shape.
+        base = list(_NODE_COLUMNS_RAW)
+        partitions = base.pop()  # last element is `partitions`
+        extras_sized: list[tuple[str, str, int, str]] = []
+        for col in self._extra_columns:
+            data_w = 32   # default sized for triples like "289 GiB / 39.3 TiB / 41.7 TiB"
+            if col.width is not None:
+                data_w = max(col.width, 8)
+            label = f"{col.header} (free/alloc/total)"
+            extras_sized.append((col.id, label, data_w, "triple"))
+        full = base + extras_sized + [partitions]
+        # Width: +2 for " ↑" arrow, +1 for a breathing column gap.
+        self._columns: tuple[tuple[str, str, int, str], ...] = tuple(
+            (k, l, max(len(l) + 2, w + 1), kind) for k, l, w, kind in full
+        )
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -393,10 +419,10 @@ class NodesTable(Widget):
                 yield Static("?", classes="help_btn", id="filter_help")
                 yield Static("Clear", classes="clear_btn", id="filter_clear")
             # Custom clickable header — replaces DataTable's built-in one.
-            yield SortableHeader(list(_NODE_COLUMNS))
+            yield SortableHeader(list(self._columns))
             table = DataTable(zebra_stripes=True, cursor_type="row",
                               show_header=False, id="nodes_dt")
-            for key, _base, width, _kind in _NODE_COLUMNS:
+            for key, _base, width, _kind in self._columns:
                 table.add_column("", key=key, width=width)
             yield table
 
@@ -426,13 +452,13 @@ class NodesTable(Widget):
             self.query_one("#filter", Input).value = ""
 
     def _sort_col_kind(self) -> str:
-        return next((k for ck, _b, _w, k in _NODE_COLUMNS if ck == self._sort_col), "simple")
+        return next((k for ck, _b, _w, k in self._columns if ck == self._sort_col), "simple")
 
     # SortableHeader → sort state change.
     def on_sortable_header_sort_changed(self, event: SortableHeader.SortChanged) -> None:
         col = event.col
         metric = event.metric
-        kind = next((k for ck, _b, _w, k in _NODE_COLUMNS if ck == col), "simple")
+        kind = next((k for ck, _b, _w, k in self._columns if ck == col), "simple")
 
         if kind == "triple":
             if metric is None:
@@ -535,22 +561,22 @@ class NodesTable(Widget):
         if (err := snapshot.errors.get("nodes")) or not snapshot.nodes:
             self._row_keys.clear()
             table.clear()
-            n_cols = len(_NODE_COLUMNS)
+            n_cols = len(self._columns)
             if err:
                 table.add_row(Text(f"⚠ {err}", style="bold red"), *([""] * (n_cols - 1)))
             else:
                 table.add_row(Text("— no node data —", style="dim italic"), *([""] * (n_cols - 1)))
             return
 
-        storage_map = _storage_by_node(snapshot.storage)
+        extras_by_id = self._build_extras_by_id(snapshot.storage)
         matcher = make_matcher(self.filter_text, list(_NODE_FILTER_DEFAULT_FIELDS))
         candidate_nodes = [
             n for n in snapshot.nodes
-            if matcher(_node_filter_record(n, storage_map))
+            if matcher(_node_filter_record(n, extras_by_id))
         ]
         nodes = sorted(
             candidate_nodes,
-            key=lambda n: _node_sort_key(n, self._sort_col, self._sort_metric, storage_map),
+            key=lambda n: _node_sort_key(n, self._sort_col, self._sort_metric, extras_by_id),
             reverse=self._sort_reverse,
         )
 
@@ -563,7 +589,7 @@ class NodesTable(Widget):
         new_keys: set[str] = set()
         mut_count = 0
         for n in nodes:
-            row = self._row_for_node(n, storage_map)
+            row = self._row_for_node(n, extras_by_id)
             new_keys.add(n.name)
             if n.name in self._row_keys:
                 rk = self._row_keys[n.name]
@@ -573,7 +599,7 @@ class NodesTable(Widget):
                     except Exception:
                         pass
             else:
-                values = [row[k] for k, _l, _w, _s in _NODE_COLUMNS]
+                values = [row[k] for k, _l, _w, _s in self._columns]
                 rk = table.add_row(*values, key=n.name)
                 self._row_keys[n.name] = rk
             mut_count += 1
@@ -591,7 +617,7 @@ class NodesTable(Widget):
                 await asyncio.sleep(0)
 
         if not nodes:
-            n_cols = len(_NODE_COLUMNS)
+            n_cols = len(self._columns)
             table.add_row(Text(f"— no nodes match '{self.filter_text}' —", style="dim italic"),
                           *([""] * (n_cols - 1)))
 
@@ -605,28 +631,46 @@ class NodesTable(Widget):
         # No-op: debounce in on_input_changed handles the rebuild.
         return
 
+    def _build_extras_by_id(
+        self, storage: list[StorageEntry]
+    ) -> dict[str, dict[str, StorageEntry]]:
+        """For each configured extra column, walk `storage` and return a
+        per-column `{node_name → entry}` map. Today only source =
+        "storage_prefix" is implemented; future sources extend this."""
+        out: dict[str, dict[str, StorageEntry]] = {}
+        for col in self._extra_columns:
+            if col.source == "storage_prefix" and col.prefix:
+                out[col.id] = _storage_by_node_for_prefix(storage, col.prefix)
+            else:
+                out[col.id] = {}
+        return out
+
     # ── data ──────────────────────────────────────────────
 
     def _row_for_node(
         self,
         n: Node,
-        storage_map: dict[str, dict[str, StorageEntry]],
+        extras_by_id: dict[str, dict[str, StorageEntry]],
     ) -> dict[str, Text | str]:
         mem_total = _mem_gib(n.mem_total_mb)
         mem_alloc = _mem_gib(n.mem_alloc_mb)
         mem_free = max(mem_total - mem_alloc, 0.0)
         bases = sorted({p.rsplit("_", 1)[0] if "_" in p else p for p in n.partitions})
-        per_node = storage_map.get(n.name.lower(), {})
-        return {
+        row: dict[str, Text | str] = {
             "name":       Text(n.name),
             "state":      _state_text(n.state),
             "cpu":        fat(n.cpu_free, n.cpu_alloc, n.cpu_total),
             "gpu":        _gpu_cell(n),
             "mem":        fat_float(mem_free, mem_alloc, mem_total),
-            "ssd":        _storage_cell(per_node.get("ssd")),
-            "hdd":        _storage_cell(per_node.get("hdd")),
             "partitions": Text(", ".join(bases) if bases else "—"),
         }
+        # Configured extra columns. Today every source resolves to a
+        # StorageEntry rendered via _storage_cell; future sources can
+        # branch on col.source.
+        for col in self._extra_columns:
+            entry = extras_by_id.get(col.id, {}).get(n.name.lower())
+            row[col.id] = _storage_cell(entry)
+        return row
 
     async def update_snapshot(self, snapshot: Snapshot) -> None:
         """Async + chunked rebuild — yields the event loop every 50 row
@@ -642,22 +686,22 @@ class NodesTable(Widget):
         if (err := snapshot.errors.get("nodes")) or not snapshot.nodes:
             self._row_keys.clear()
             table.clear()
-            n_cols = len(_NODE_COLUMNS)
+            n_cols = len(self._columns)
             if err:
                 table.add_row(Text(f"⚠ {err}", style="bold red"), *([""] * (n_cols - 1)))
             else:
                 table.add_row(Text("— no node data —", style="dim italic"), *([""] * (n_cols - 1)))
             return
 
-        storage_map = _storage_by_node(snapshot.storage)
+        extras_by_id = self._build_extras_by_id(snapshot.storage)
         matcher = make_matcher(self.filter_text, list(_NODE_FILTER_DEFAULT_FIELDS))
         candidate_nodes = [
             n for n in snapshot.nodes
-            if matcher(_node_filter_record(n, storage_map))
+            if matcher(_node_filter_record(n, extras_by_id))
         ]
         nodes = sorted(
             candidate_nodes,
-            key=lambda n: _node_sort_key(n, self._sort_col, self._sort_metric, storage_map),
+            key=lambda n: _node_sort_key(n, self._sort_col, self._sort_metric, extras_by_id),
             reverse=self._sort_reverse,
         )
 
@@ -670,7 +714,7 @@ class NodesTable(Widget):
         new_keys: set[str] = set()
         mut_count = 0
         for n in nodes:
-            row = self._row_for_node(n, storage_map)
+            row = self._row_for_node(n, extras_by_id)
             new_keys.add(n.name)
             if n.name in self._row_keys:
                 rk = self._row_keys[n.name]
@@ -680,7 +724,7 @@ class NodesTable(Widget):
                     except Exception:
                         pass
             else:
-                values = [row[k] for k, _l, _w, _s in _NODE_COLUMNS]
+                values = [row[k] for k, _l, _w, _s in self._columns]
                 rk = table.add_row(*values, key=n.name)
                 self._row_keys[n.name] = rk
             mut_count += 1
@@ -698,7 +742,7 @@ class NodesTable(Widget):
                 await asyncio.sleep(0)
 
         if not nodes:
-            n_cols = len(_NODE_COLUMNS)
+            n_cols = len(self._columns)
             table.add_row(Text(f"— no nodes match '{self.filter_text}' —", style="dim italic"),
                           *([""] * (n_cols - 1)))
 
