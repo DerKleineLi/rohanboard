@@ -242,7 +242,10 @@ class RohanBoardApp(App):
         quota_label: str | None = None
         quota_filesystem: str | None = None
         df_explicit: list[tuple[str, str]] = []   # (label, path) for kind=df
+        df_explicit_groups: dict[str, str | None] = {}   # path → group, for kind=df
         df_globs: list[str] = []                   # shell globs for kind=auto
+        dssusrinfo_subcommands: list[str] = []
+        dssusrinfo_entries: list = []  # subset of storage_entries with kind=dssusrinfo
         for entry_cfg in self.cfg.storage_entries:
             if entry_cfg.kind == "quota":
                 if quota_user is None:
@@ -251,12 +254,19 @@ class RohanBoardApp(App):
                     quota_filesystem = entry_cfg.filesystem
             elif entry_cfg.kind == "df" and entry_cfg.path:
                 df_explicit.append((entry_cfg.label, entry_cfg.path))
+                df_explicit_groups[entry_cfg.path] = entry_cfg.group
             elif entry_cfg.kind == "auto":
                 prefixes = entry_cfg.prefixes or ["/cluster", "/cluster_HDD"]
                 # Glob each prefix so the remote shell expands to all
                 # autofs-visible children (df then triggers cold mounts
                 # as it accesses each).
                 df_globs.extend(p.rstrip("/") + "/*" for p in prefixes)
+            elif entry_cfg.kind == "dssusrinfo":
+                dssusrinfo_entries.append(entry_cfg)
+                if entry_cfg.mode == "home":
+                    dssusrinfo_subcommands.append("dsshome")
+                elif entry_cfg.mode == "container":
+                    dssusrinfo_subcommands.append("container_usage")
 
         squeue_users_resolved: list[str] | None = None
         sacct_users_resolved: list[str] | None = None
@@ -283,6 +293,7 @@ class RohanBoardApp(App):
                     sacct_format=slurm.SACCT_FORMAT,
                     sacct_starttime="now-3days",
                     sacct_users=sacct_users_resolved,
+                    dssusrinfo_subcommands=dssusrinfo_subcommands,
                 )
         except Exception as e:
             snap.errors["combined"] = str(e)
@@ -313,8 +324,17 @@ class RohanBoardApp(App):
                     snap.nodes = nodes
                 except Exception as e:
                     snap.errors["nodes"] = str(e)
-                # storage: quota + df-multi
+                # storage: quota + df-multi + dssusrinfo
                 entries: list[StorageEntry] = []
+                # quota carries no `group` from config today (only one
+                # quota entry is supported; the user can mark it via
+                # `group="home"` in TOML if they want the group title).
+                quota_group: str | None = None
+                if quota_user:
+                    for entry_cfg in self.cfg.storage_entries:
+                        if entry_cfg.kind == "quota":
+                            quota_group = entry_cfg.group
+                            break
                 if quota_user and raw.quota.strip():
                     try:
                         q = storage.parse_quota(
@@ -323,6 +343,7 @@ class RohanBoardApp(App):
                             filesystem=quota_filesystem,
                         )
                         if q is not None:
+                            q.group = quota_group
                             entries.append(q)
                     except Exception as e:
                         snap.errors[f"storage:{quota_label}"] = str(e)
@@ -330,14 +351,39 @@ class RohanBoardApp(App):
                     try:
                         df_rows = storage.parse_df_multi(raw.df)
                         # Apply explicit (label, path) overrides — kind=df
-                        # entries get their user-specified label.
+                        # entries get their user-specified label and
+                        # group from config.
                         path_to_label = {p: l for l, p in df_explicit}
                         for entry in df_rows:
                             if entry.path in path_to_label:
                                 entry.label = path_to_label[entry.path]
+                                entry.group = df_explicit_groups.get(entry.path)
                             entries.append(entry)
                     except Exception as e:
                         snap.errors["storage:df"] = str(e)
+                if dssusrinfo_entries and raw.dssusrinfo.strip():
+                    for entry_cfg in dssusrinfo_entries:
+                        try:
+                            if entry_cfg.mode == "home":
+                                e_obj = storage.parse_dssusrinfo_dsshome(
+                                    raw.dssusrinfo,
+                                    label=entry_cfg.label,
+                                    path=entry_cfg.path,
+                                )
+                            elif entry_cfg.mode == "container":
+                                e_obj = storage.parse_dssusrinfo_container(
+                                    raw.dssusrinfo,
+                                    container=entry_cfg.container or "",
+                                    label=entry_cfg.label,
+                                    path=entry_cfg.path,
+                                )
+                            else:
+                                e_obj = None
+                            if e_obj is not None:
+                                e_obj.group = entry_cfg.group
+                                entries.append(e_obj)
+                        except Exception as e:
+                            snap.errors[f"storage:{entry_cfg.label}"] = str(e)
                 snap.storage = entries
 
         # Append to rolling history (only if we got node data).

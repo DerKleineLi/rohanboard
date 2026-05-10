@@ -202,6 +202,105 @@ def discover_mounts(
     return out
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# dssusrinfo (LRZ DSS — per-user / per-container quota)
+# ──────────────────────────────────────────────────────────────────────────
+#
+# dssusrinfo is a Python wrapper at /usr/local/bin/dssusrinfo on LRZ login
+# nodes. Subcommands of interest (probed live 2026-05-10):
+#
+#   dssusrinfo dsshome           → user's home-dir usage on /dss/dsshome1
+#   dssusrinfo container_usage   → project-shared usage of every container
+#                                  the user has access to (NOT per-user)
+#   dssusrinfo my_usage          → user's footprint inside each container
+#                                  (totals are "Container MAX" — no per-user
+#                                  cap, so unusable for a usage-bar)
+#
+# Both `dsshome` and `container_usage` print star-bordered blocks. The data
+# rows we care about look like:
+#
+#   *               89 of 100              GB    used                    *
+#   * pn25pi-dss-0000          9810 of 10000      GB    used             *
+#
+# Files-counted rows have the same shape but say "Files used" instead of
+# "GB used"; those are skipped here.
+
+# Match a "<used> of <total> GB used" row — total may be a numeric string
+# (real quota), or "Unlimited" / "Container MAX" (unbounded; row is
+# unusable for a usage bar). Group 1 = optional leading container/label,
+# Group 2 = used (digits), Group 3 = total token.
+_DSSUSRINFO_GB_RE = re.compile(
+    r"^\*\s*(?P<lead>\S*)\s+(?P<used>\d+)\s+of\s+"
+    r"(?P<total>\d+|Unlimited|Container\s+MAX)\s+GB\s+used\b",
+    re.IGNORECASE,
+)
+
+_GB = 1024 ** 3
+
+
+def parse_dssusrinfo_dsshome(text: str, label: str, path: str | None) -> StorageEntry | None:
+    """Parse `dssusrinfo dsshome` stdout. The home block has a leading
+    "DSS Homedir info for <user>:" header followed by ONE GB-used row
+    (no container prefix; `lead` group is empty)."""
+    in_block = False
+    for line in text.splitlines():
+        if "DSS Homedir info" in line:
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        m = _DSSUSRINFO_GB_RE.match(line)
+        if not m:
+            continue
+        # Home: lead must be empty (no container token).
+        if m.group("lead"):
+            continue
+        total_token = m.group("total")
+        if not total_token.isdigit():
+            return None  # Unlimited home is unusual but not a usage bar.
+        return StorageEntry(
+            label=label,
+            used_bytes=int(m.group("used")) * _GB,
+            total_bytes=int(total_token) * _GB,
+            source="dssusrinfo",
+            path=path,
+        )
+    return None
+
+
+def parse_dssusrinfo_container(
+    text: str, container: str, label: str, path: str | None
+) -> StorageEntry | None:
+    """Parse `dssusrinfo container_usage` stdout for the named container.
+
+    The block has one GB-used row per accessible container. We match the
+    `lead` token against `container` exactly (containers are namespaced
+    like `pn25pi-dss-0000`)."""
+    in_block = False
+    for line in text.splitlines():
+        if "DSS Container usage" in line:
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        m = _DSSUSRINFO_GB_RE.match(line)
+        if not m:
+            continue
+        if m.group("lead") != container:
+            continue
+        total_token = m.group("total")
+        if not total_token.isdigit():
+            return None
+        return StorageEntry(
+            label=label,
+            used_bytes=int(m.group("used")) * _GB,
+            total_bytes=int(total_token) * _GB,
+            source="dssusrinfo",
+            path=path,
+        )
+    return None
+
+
 async def fetch_proc_mounts(executor: Executor) -> str:
     """Read `/proc/mounts` via the executor. Returns "" on failure so a
     transient SSH glitch doesn't crash the refresh tick — callers

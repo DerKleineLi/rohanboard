@@ -41,6 +41,7 @@ class CombinedRaw:
     squeue: str = ""
     sacct: str = ""
     nodes: str = ""
+    dssusrinfo: str = ""
 
 
 # Section key → list of shell command strings to run in the remote bash.
@@ -110,6 +111,7 @@ def parse_combined(text: str) -> CombinedRaw:
         squeue="\n".join(sections.get("squeue", [])),
         sacct="\n".join(sections.get("sacct", [])),
         nodes="\n".join(sections.get("nodes", [])),
+        dssusrinfo="\n".join(sections.get("dssusrinfo", [])),
     )
 
 
@@ -124,6 +126,7 @@ async def fetch_combined(
     sacct_format: str,
     sacct_starttime: str,
     sacct_users: list[str] | None,
+    dssusrinfo_subcommands: list[str] | None = None,
     timeout: float = 25.0,
 ) -> CombinedRaw:
     """Run the combined script in one ssh channel and parse the result.
@@ -162,6 +165,28 @@ async def fetch_combined(
     else:
         sacct_argv += ["-a"]
     sections["sacct"] = " ".join(shlex.quote(a) for a in sacct_argv)
+
+    # dssusrinfo: a list of subcommands (e.g. ["dsshome", "container_usage"]).
+    # We concatenate them inside the section so a single dssusrinfo block
+    # carries all the data the parsers need. Each subcommand prints its own
+    # star-bordered block, so the parsers can split by the in-block header.
+    if dssusrinfo_subcommands:
+        # Dedupe while preserving order.
+        seen_sub: set[str] = set()
+        ordered_subs: list[str] = []
+        for sub in dssusrinfo_subcommands:
+            if sub not in seen_sub:
+                seen_sub.add(sub)
+                ordered_subs.append(sub)
+        # Wrap in an inner subshell so the outer `> "$T/dssusrinfo"`
+        # redirect captures BOTH commands' stdout — `( a; b ) > FILE`
+        # redirects the whole subshell, whereas `a; b > FILE` (which is
+        # what build_script's template produces if we hand it a raw `;`)
+        # only redirects the LAST command. Bug observed live 2026-05-10
+        # when the home block was silently dropped.
+        sections["dssusrinfo"] = (
+            "( " + "; ".join(f"dssusrinfo {shlex.quote(sub)}" for sub in ordered_subs) + " )"
+        )
 
     script = build_script(sections)
     rc, stdout, stderr = await executor.run(["bash", "-c", script], timeout=timeout)
