@@ -312,10 +312,6 @@ class OverviewPanel(Widget):
 
     # width threshold for switching between 1-col and 2-col
     WIDE_MIN_WIDTH = 130
-    # util needs: border(2) + title(1) + title_margin(2) + padding_bot(1)
-    #           + body(3 labels=3 + 3 sparks ≥1 each=3) = 12.  A bit more
-    # for readable sparks:
-    UTIL_MIN_HEIGHT = 13
     # rough natural heights used only for deciding whether util fits
     _TOTALS_NATURAL = 15
     _HOME_NATURAL = 7
@@ -370,13 +366,22 @@ class OverviewPanel(Widget):
         else:
             mode = "wide"
             left_nat = self._TOTALS_NATURAL + 1 + self._HOME_NATURAL
-            right_nat = jobs_nat
+            # Cap the right column at the left column's natural height so
+            # the wide-mode grid (both cols 1fr → equal) never has to
+            # stretch one side and shrink the other. CompactJobs has its
+            # own VerticalScroll body, so the cap is "ok, it'll scroll
+            # internally", not "we lose rows". The +1-for-margin gap test
+            # below then becomes a clean two-way decision: util fits on
+            # the right (where jobs sits in a shorter natural height) or
+            # nowhere — there's no longer a left-side util case, since
+            # right_nat ≤ left_nat by construction.
+            right_nat = min(left_nat, jobs_nat)
             natural_need = max(left_nat, right_nat)
             shorter_nat = min(left_nat, right_nat)
             gap = natural_need - shorter_nat
             util_side = None
-            if natural_need <= h and gap >= self.UTIL_MIN_HEIGHT + 1:
-                util_side = "right" if right_nat <= left_nat else "left"
+            if natural_need <= h and gap >= UtilizationPanel.MIN_HEIGHT + 1:
+                util_side = "right"
         # Scroll mode when the minimum natural layout can't fit the window.
         fit = natural_need <= h
         if fit:
@@ -432,15 +437,11 @@ class OverviewPanel(Widget):
             main.mount(col_right)
 
             col_left.mount(_card(NodesSummary()))
-            if util_side == "left":
-                col_left.mount(_card(HomeStorage()))
-                col_left.mount(_card(UtilizationPanel(), flex=True))
-            else:
-                # no util on left: stretch Home only when the columns need
-                # balancing (i.e. util is absent entirely).  When util is
-                # on the right, left is already the taller col — leave Home
-                # natural.
-                col_left.mount(_card(HomeStorage(), flex=(util_side is None)))
+            # With right_nat capped at left_nat, util_side is either
+            # "right" (slack on the right column → util mounts there)
+            # or None (no slack → no util at all). Stretch HomeStorage
+            # only in the no-util case so the left col fills the grid.
+            col_left.mount(_card(HomeStorage(), flex=(util_side is None)))
 
             if util_side == "right":
                 col_right.mount(_card(CompactJobs()))

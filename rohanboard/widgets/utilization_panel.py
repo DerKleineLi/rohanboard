@@ -16,6 +16,16 @@ from .fixed_sparkline import FixedSparkline as Sparkline
 
 
 class UtilizationPanel(Widget):
+    # Useful min height — border(2) + title(1) + title margins(2) + padding
+    # bot(1) + body(3 labels=3 + 3 sparks @≥1 each=3) = 12; +1 for the
+    # margin between cards in the OverviewPanel grid. Layouts that can't
+    # spare this many rows should NOT mount a UtilizationPanel at all.
+    # The CSS `min-height: 8` below is the absolute floor (sparks at 1
+    # row, no breathing room); the dashboard's `UTIL_MIN_HEIGHT` checks
+    # use this constant instead so both numbers live next to the widget
+    # they describe.
+    MIN_HEIGHT = 13
+
     DEFAULT_CSS = """
     UtilizationPanel {
         height: 1fr;
