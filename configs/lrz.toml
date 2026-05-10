@@ -6,10 +6,15 @@
 # Notes (per ~/.claude/projects/-home-hli/memory/cluster_lrz.md):
 # - exec MUST be ssh:lrz; the alias is configured in ~/.ssh/config with
 #   ProxyJump through lrzlogin (cold connection ≈ 10.5 s).
-# - LRZ login node does NOT have the `quota` binary. Use kind = "df" for
-#   home + scratch + MCML; the numbers reflect filesystem-aggregate
-#   capacity, not per-user usage (LRZ doesn't expose per-user quotas
-#   via a CLI we can call from the login node).
+# - LRZ login node does NOT have the `quota` binary. Use:
+#     - kind = "dssusrinfo" mode = "home" for /dss/dsshome1 (per-user)
+#     - kind = "dssusrinfo" mode = "container" for MCML DSS (project-shared)
+#     - kind = "df" for the scratch fs (dssusrinfo doesn't cover scratch
+#       — it's not a DSS container; df gives filesystem-aggregate)
+#   `dssusrinfo` lives at /usr/local/bin/dssusrinfo on LRZ login. The two
+#   subcommands the dashboard uses are `dsshome` (home dir) and
+#   `container_usage` (project containers). See Phase 4d.2-C in
+#   CLAUDE_README for the parser contract.
 # - Storage paths use the FILESYSTEM MOUNT roots (e.g. /dss/dsshome1),
 #   not the user-specific subdirs. df -B1 resolves either to the same
 #   filesystem row, but the v2 combined collector's label-override
@@ -35,15 +40,21 @@ storage = 60
 
 [[storage.entries]]
 label = "home"
-kind = "df"
+kind = "dssusrinfo"
+mode = "home"
 path = "/dss/dsshome1"
+group = "home"
 
 [[storage.entries]]
 label = "scratch ($MCMLSCRATCH)"
 kind = "df"
 path = "/dss/mcmlscratch"
+group = "scratch"
 
 [[storage.entries]]
-label = "MCML DSS"
-kind = "df"
+label = "MCML DSS (pn25pi-dss-0000)"
+kind = "dssusrinfo"
+mode = "container"
+container = "pn25pi-dss-0000"
 path = "/dss/dssmcmlfs01"
+group = "persistent"
