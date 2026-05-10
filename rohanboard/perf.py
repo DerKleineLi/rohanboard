@@ -40,6 +40,26 @@ if _ENV:
         _PATH = None
 
 
+def enable(path: "Path | str") -> Path:
+    """Phase 4d.2-E: programmatically turn on perf logging from the
+    `--debug` CLI flag, writing to `path`. Returns the resolved path so
+    the caller can echo it. Existing `ROHANBOARD_PERF_LOG`-driven init
+    above still works; this is the lighter path the CLI uses when the
+    user just wants `rohanboard --debug`.
+    """
+    global _PATH
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # Header on each fresh enable so a tail-following user can
+        # spot the column shape immediately.
+        p.write_text("t_unix,kind,name,ms,extra\n")
+    except Exception:
+        pass
+    _PATH = p
+    return p
+
+
 def perf_log(kind: str, name: str, ms: float, extra: str = "") -> None:
     if _PATH is None:
         return

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import os
+import time as _time
 from pathlib import Path
 from typing import Callable
 
@@ -65,6 +67,18 @@ class RohanBoardApp(App):
         super().__init__()
         self.cfg = config or load_config()
         self._history: deque[UtilizationSample] = deque(maxlen=HISTORY_CAP)
+        # Phase 4d.2-E: --debug CLI flag opens a per-tick text log file
+        # the user can `tail -f` outside the TUI. Path comes from the
+        # ROHANBOARD_DEBUG_LOG env var (set by __main__.py when --debug
+        # is passed). When unset, `_debug_log` is a no-op.
+        self._debug_log_path: Path | None = None
+        env_log = os.environ.get("ROHANBOARD_DEBUG_LOG")
+        if env_log:
+            self._debug_log_path = Path(env_log).expanduser()
+            try:
+                self._debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                self._debug_log_path = None
         # Phase 4c: collectors take an Executor.  Picker is config-driven:
         #   exec = "local"      → LocalExecutor (default)
         #   exec = "ssh:<host>" → AsyncSSHExecutor(host=<host>) — uses
@@ -100,6 +114,22 @@ class RohanBoardApp(App):
         if not theme_path.is_absolute():
             theme_path = Path(__file__).parent / "styles" / theme_path
         self.CSS_PATH = theme_path  # type: ignore[assignment]
+
+    def _debug_log(self, msg: str) -> None:
+        """Phase 4d.2-E: append a timestamped line to the --debug log
+        file. No-op when --debug isn't set. Tee'd to Textual's own
+        `self.log()` so the TUI's devtools console sees it too."""
+        try:
+            self.log(msg)
+        except Exception:
+            pass
+        if self._debug_log_path is None:
+            return
+        try:
+            with self._debug_log_path.open("a") as f:
+                f.write(f"{_time.strftime('%H:%M:%S')} {msg}\n")
+        except Exception:
+            pass
 
     # ────────────────────────────────────────────────────────────────────
     # composition
@@ -322,12 +352,32 @@ class RohanBoardApp(App):
                 # squeue → jobs
                 try:
                     snap.jobs = slurm.parse_squeue(raw.squeue)
+                    # Phase 4d.2-E: surface parser drop count so the user
+                    # can see if rows are being silently rejected. Each
+                    # squeue row is one line.
+                    squeue_lines = raw.squeue.count("\n")
+                    if not raw.squeue.endswith("\n") and raw.squeue:
+                        squeue_lines += 1
+                    self._debug_log(
+                        f"squeue: {squeue_lines} lines, "
+                        f"parsed {len(snap.jobs)} jobs "
+                        f"(drop={squeue_lines - len(snap.jobs)})"
+                    )
                 except Exception as e:
                     snap.errors["jobs"] = str(e)
                 # sacct → recent_jobs
                 try:
                     recent = slurm.parse_sacct(raw.sacct)
                     snap.recent_jobs = list(reversed(recent))[:50]
+                    sacct_lines = raw.sacct.count("\n")
+                    if not raw.sacct.endswith("\n") and raw.sacct:
+                        sacct_lines += 1
+                    self._debug_log(
+                        f"sacct: {sacct_lines} lines, "
+                        f"parsed {len(recent)} jobs (kept top "
+                        f"{len(snap.recent_jobs)}; "
+                        f"drop={sacct_lines - len(recent)})"
+                    )
                 except Exception as e:
                     snap.errors["recent_jobs"] = str(e)
                 # scontrol show node → nodes (with partition filters)
@@ -499,6 +549,19 @@ class RohanBoardApp(App):
         JobsTable._apply_filter_async — so input dispatch isn't held
         for the full duration of a heavy table rebuild.
         """
+        # Phase 4d.2-E: per-tick diagnostic line — shows whether
+        # cluster_user is empty (whoami still resolving) AND whether
+        # `j.user` strings actually match (so the mine_only filter is
+        # comparing apples to apples). Tail ~/.cache/rohanboard/debug.log
+        # to watch this in real time when running with --debug.
+        sample_user = new.jobs[0].user if new.jobs else None
+        sample_recent = new.recent_jobs[0].user if new.recent_jobs else None
+        self._debug_log(
+            f"snap.cluster_user={new.cluster_user!r} "
+            f"jobs={len(new.jobs)} sample_user={sample_user!r} "
+            f"recent_jobs={len(new.recent_jobs)} "
+            f"sample_recent_user={sample_recent!r}"
+        )
         import inspect
         import time as _t
         with perf_block("fanout", "all"), self.batch_update():
