@@ -29,6 +29,12 @@ This file is the project-local runbook for `rohanboard` on `clean-reimpl-v2`. Re
   - `f925402` `configs/lrz.toml` — `exec = "ssh:lrz"`, df-only storage (no `quota`), bumped first-refresh interval for the cold-ProxyJump ≈ 10.5 s window.
   - `0897219` `users = ["self"]` resolved by the executor's `whoami` (so a config can be `users = ["self"]` and Just Work on whichever cluster).
 - **Phase 4d.2-B** (landed 2026-05-10): generic `[[nodes_table.columns]]` schema — per-node storage columns are no longer hardcoded ssd/hdd in `nodes_table.py`. Each cluster declares its own columns in TOML; the only handler today is `source = "storage_prefix"` (matches snapshot.storage entries with path `<prefix>/<node>`). LRZ omits the section entirely → no SSD/HDD columns. Rohan declares two columns (`/cluster`, `/cluster_HDD`) → identical layout to before. Filter expressions auto-pick up `<col.id>_free / _used / _total` per declared column.
+- **Phase 4d.2-C** (landed 2026-05-10): explicit `group` field on `[[storage.entries]]` + LRZ `kind = "dssusrinfo"` per-user quota.
+  - `_classify` honors `entry.group` first; rohan's path-based fallback (`/cluster` → ssd, `/cluster_HDD` → hdd) still drives auto-discovered mounts.
+  - `StoragePanel.GROUP_ORDER` extended to `("home", "ssd", "hdd", "scratch", "persistent", "other")`.
+  - `kind = "dssusrinfo"` (LRZ login) accepts `mode = "home"` (uses `dssusrinfo dsshome`) or `mode = "container"` with `container = "<name>"` (uses `dssusrinfo container_usage`). Parser is tolerant: empty input / unknown container / unbounded total all return None so a transient hiccup doesn't crash the tick.
+  - Combined-collector gotcha: a section value with `;` chained commands MUST be wrapped in an inner `( ... )` subshell — `( a; b ) > FILE` redirects the whole subshell, but `( a; b > FILE )` only redirects `b`. Multi-subcommand sections without the wrap silently drop the first command's output. Locked by `test_fetch_combined_dssusrinfo_section_uses_inner_subshell`.
+  - LRZ TOML now: home (dssusrinfo dsshome) + scratch (df aggregate — dssusrinfo doesn't cover scratch) + MCML DSS (dssusrinfo container_usage). Smoke verified: home 89%, scratch 78%, persistent 98%.
 - **Phase 4e+** (not yet started): multi-cluster SSH wiring.
 
 ## Layout defaults
@@ -60,7 +66,7 @@ After respawn, capture-pane after ~10 s to confirm: cluster name in header, Stor
 
 ## Testing
 
-- **Unit + Pilot tests:** `uv run pytest tests/`. As of 2026-05-10: 71/71 passing.
+- **Unit + Pilot tests:** `uv run pytest tests/`. As of 2026-05-10 (post-4d.2-C): 86/86 passing.
 - **Filter-drop regression test:** `tests/test_input_drops.py` exercises both 600 ms (synchronous-blocker) and 50 ms (debounce-coalesce) rhythms on JobsTable and NodesTable filters. The 600 ms test is the canonical drops repro per `~/.claude/projects/-home-hli/memory/rohanboard.md` §"Filter-bar character-drop variant".
 - **Live tmux drops test:** see the memory file for byte-offset oracle / SGR mouse-click recipes if you need to repro on a real terminal.
 
@@ -71,6 +77,8 @@ After respawn, capture-pane after ~10 s to confirm: cluster name in header, Stor
 - **`l` is bound to `action_jobs_tail_log` on the Jobs tab** (scoped via `App.check_action`). Test strings containing `q`/`r`/`l` are unsafe if focus drifts off the filter Input. Test string `testhello` contains `l` — Pilot keeps focus stable so it's fine in-process, but be cautious in tmux real-terminal tests.
 - **`watch_filter_text` is now a no-op** — debounce in `on_input_changed` drives the rebuild via `run_worker(_apply_filter_async, exclusive=True)`. The reactive write still fires the watcher, but the watcher does nothing; do NOT re-add a synchronous rebuild there.
 - **Per-node Nodes-tab columns are config-driven (Phase 4d.2-B)** — `[[nodes_table.columns]]` in the cluster TOML declares them. Today the only `source` is `"storage_prefix"`, which matches `snapshot.storage` entries whose path is `<prefix>/<node>`. To add a new source: add a branch in `NodesTable._build_extras_by_id` + (if not a StorageEntry) `NodesTable._row_for_node`; the config schema (`NodesTableColumnConfig`) is already extensible. The filter help modal `NODES_FILTER_SPEC` still hardcodes ssd/hdd as example numeric fields; harmless on LRZ (those tokens just match nothing) but a small UX wart for non-rohan clusters.
+- **Storage groups are config-driven (Phase 4d.2-C)** — `group = "home"|"ssd"|"hdd"|"scratch"|"persistent"|"other"` on each `[[storage.entries]]` picks the StoragePanel render bucket. Without it, the path-based heuristic still works for rohan's `kind = "auto"` mounts. Adding a new group: append to `StoragePanel.GROUP_ORDER` and `_GROUP_TITLES` — entries with an explicit `group` matching a NEW value will land there automatically; ones with an unknown group bucket into "other".
+- **kind = "dssusrinfo" on LRZ (Phase 4d.2-C)** — runs `dssusrinfo dsshome` (mode="home") or `dssusrinfo container_usage` (mode="container", with `container = "<name>"`). The combined collector chains the needed subcommands inside ONE ssh channel via an inner subshell `( a; b ) > FILE` so the redirect captures every subcommand's stdout (a `( a; b > FILE )` shape silently drops earlier commands). LRZ login is the only host with the dssusrinfo binary; running with `kind = "dssusrinfo"` against any other cluster will return empty parser output → no entry for that tick.
 
 ## Known follow-ups (planned but not yet implemented)
 
