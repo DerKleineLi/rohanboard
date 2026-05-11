@@ -488,7 +488,15 @@ class NodesTable(Widget):
             self._sort_col, self._sort_metric, self._sort_reverse
         )
         if self._last_snapshot is not None:
-            self.update_snapshot(self._last_snapshot)
+            # TODO Bundle 2+: route sort flips through an App-level reactive
+            # the same way JobsTable does (Phase 4d.2-E step H.1/H.2). Today
+            # this sync call on the async `update_snapshot` silently drops
+            # the coroutine — same shape as the bug Phase H caught on the
+            # Jobs side. NodesTable doesn't currently use sort-flips via
+            # click in practice (rohan layout pins the header sort), so the
+            # latency hit is latent. Surfaced 2026-05-11 by the Bundle 1
+            # lint script (scripts/lint_sync_call_on_async.py).
+            self.update_snapshot(self._last_snapshot)  # noqa: lint-async-call
 
     def _insert_filter_fragment(self, fragment: str | None) -> None:
         if not fragment:
@@ -544,8 +552,13 @@ class NodesTable(Widget):
                 group=f"apply_filter_nodes_{self.id or id(self)}",
             )
         except Exception:
-            # Fallback (no event loop / test path): run synchronously.
-            self.update_snapshot(self._last_snapshot)
+            # TODO Bundle 2+: this fallback was the JobsTable shape that
+            # Phase 4d.2-E step H REMOVED (it silently dropped the coro
+            # in non-event-loop paths and confused tests). NodesTable still
+            # has it. Replace with `pass` once a test demonstrates the
+            # fallback isn't needed in any pilot path. Surfaced 2026-05-11
+            # by the Bundle 1 lint (scripts/lint_sync_call_on_async.py).
+            self.update_snapshot(self._last_snapshot)  # noqa: lint-async-call
 
     async def _apply_filter_async(self, snapshot: Snapshot) -> None:
         """Async chunked filter+rebuild — `await asyncio.sleep(0)` every

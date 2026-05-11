@@ -99,6 +99,11 @@ tmux respawn-pane -k -t rohan:rb-v2-lrz \
 
 After respawn, capture-pane after ~10 s to confirm: cluster name in header, Storage `home` populated, Jobs row visible, NodesSummary table populated, footer reads `q Quit r Refresh 1 Overview 2 Jobs 3 Nodes 4 Storage`.
 
+## Lint scripts
+
+- **`scripts/lint_sync_call_on_async.py`** (Bundle 1 Sub-fix 5, 2026-05-11) — AST-walks `rohanboard/` for the Phase-H anti-pattern: a sync method calling `self.<async_method>(...)` with the result discarded (coroutine silently dropped). Excludes `@work`-decorated methods (Textual makes them sync-callable). Suppress a known-and-deferred site with a trailing `# noqa: lint-async-call`. Pinned green by `tests/test_lint_sync_call_on_async.py`. Run manually: `uv run python scripts/lint_sync_call_on_async.py`. Not CI-wired yet (user-facing decision deferred).
+- **NodesTable Phase-H carryover** — `rohanboard/widgets/nodes_table.py:491` and `:556` both call sync `self.update_snapshot(self._last_snapshot)` on the async `update_snapshot`. Currently `noqa`-suppressed with TODOs pointing at Bundle 2+. Same shape as the JobsTable bug Phase 4d.2-E step H removed; latency hit is latent (sort flips on Nodes aren't a common click path).
+
 ## Testing
 
 - **Unit + Pilot tests:** `uv run pytest tests/`. As of 2026-05-11 (post-4d.2-E): 111/111 passing.
