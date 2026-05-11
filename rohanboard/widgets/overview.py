@@ -444,7 +444,15 @@ class OverviewPanel(Widget):
     def __init__(self) -> None:
         super().__init__()
         self._job_count = 0
-        self._last_layout: tuple | None = None
+        # Phase 4d.2-E step A: split the prior monolithic `_last_layout`
+        # cache key into two. `_last_layout_key` triggers `_populate`
+        # (tear down + re-mount cards); `_last_height_key` triggers
+        # `_apply_heights` (in-place `widget.styles.height = …`). Critical
+        # for the user's `a` click latency — mine_only flips change
+        # `_job_count` → jobs_natural → target/ascii_budget but NOT
+        # mode/util_side, so they should NOT remount.
+        self._last_layout_key: tuple | None = None
+        self._last_height_key: tuple | None = None
         self._last_decision: LayoutDecision | None = None
         self._ascii_budget = 0
 
@@ -502,18 +510,34 @@ class OverviewPanel(Widget):
             home_natural=self._HOME_NATURAL,
             ascii_min_total=ASCII_MIN_TOTAL,
         )
-        # Cache as a tuple so equality short-circuits a no-op repaint.
-        layout = (
-            decision.mode, decision.util_side, decision.show_ascii,
-            decision.target, min(decision.ascii_budget, 15), decision.fit,
-            decision.nodesummary_extra, decision.home_extra,
+        # Phase 4d.2-E step A: split into two cache keys.
+        # `layout_key` covers everything that determines which widgets
+        # are mounted, in which slot, with which class. A change here
+        # requires `_populate` (tear down + re-mount). `height_key`
+        # covers the geometry numbers we can apply via in-place
+        # `widget.styles.height = …` — no remount needed.
+        layout_key = (
+            decision.mode,
+            decision.util_side,
+            decision.show_ascii,
+            decision.fit,
             decision.compact_jobs_flex,
         )
-        if layout == self._last_layout:
-            return
-        self._last_layout = layout
+        height_key = (
+            decision.target,
+            min(decision.ascii_budget, 15),
+            decision.nodesummary_extra,
+            decision.home_extra,
+        )
         self._last_decision = decision
-        self._populate()
+        if layout_key != self._last_layout_key:
+            self._last_layout_key = layout_key
+            self._last_height_key = height_key
+            self._populate()
+        elif height_key != self._last_height_key:
+            self._last_height_key = height_key
+            self._apply_heights(decision)
+        # else: no-op — both keys unchanged.
 
     def _jobs_natural(self) -> int:
         """Natural height of the CompactJobs card.
@@ -522,6 +546,66 @@ class OverviewPanel(Widget):
         return 4 + max(self._job_count, 1)
 
     # ── populate ─────────────────────────────────────────────
+
+    def _apply_heights(self, d: LayoutDecision) -> None:
+        """Phase 4d.2-E step A: in-place height update for an already-
+        populated tree. Triggered by `_relayout` when the layout-key
+        matches but the height-key changed (e.g. mine_only flip
+        changed `_job_count` → jobs_natural → target). Falls back to
+        `_populate` if any expected widget is missing — NEVER silently
+        swallows, logs the fallback so we know if it fires."""
+        with perf_block("layout", "overview_apply_heights"):
+            try:
+                main = self.query_one("#main", Vertical)
+            except Exception:
+                self.log("OverviewPanel._apply_heights: #main missing; "
+                         "falling back to _populate")
+                self._populate()
+                return
+            if d.fit and d.mode == "wide":
+                main.styles.height = d.target
+            else:
+                main.styles.height = None
+            # Wide-mode no-util balance branch may have given Totals /
+            # Home explicit heights. Recompute in place; clear when
+            # the extras are 0 so a transition out of balance mode
+            # doesn't leave stale style on the widget.
+            if d.mode == "wide":
+                try:
+                    nodes = self.query_one(NodesSummary)
+                    if d.nodesummary_extra:
+                        nodes.styles.height = (
+                            self._TOTALS_NATURAL + d.nodesummary_extra
+                        )
+                    else:
+                        nodes.styles.height = None
+                except Exception:
+                    self.log("OverviewPanel._apply_heights: NodesSummary "
+                             "missing; falling back to _populate")
+                    self._populate()
+                    return
+                try:
+                    home = self.query_one(HomeStorage)
+                    if d.home_extra:
+                        home.styles.height = self._HOME_NATURAL + d.home_extra
+                    else:
+                        home.styles.height = None
+                except Exception:
+                    self.log("OverviewPanel._apply_heights: HomeStorage "
+                             "missing; falling back to _populate")
+                    self._populate()
+                    return
+            # AsciiArt's `_max_height` gates which art variant it picks.
+            # If the decor isn't an AsciiArt (Matrix / Fire fill via
+            # `#ascii_row { height: 1fr }`), this lookup raises and we
+            # silently skip — those animations don't need the update.
+            if d.show_ascii:
+                try:
+                    art = self.query_one(AsciiArt)
+                    art._max_height = d.ascii_budget
+                    art._pick_art()
+                except Exception:
+                    pass    # decor is matrix/fire/not yet mounted
 
     def _populate(self) -> None:
         # Phase 4d.2-E step 2.5: time the populate path. This mounts
