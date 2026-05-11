@@ -78,12 +78,22 @@ async def _type_and_assert(app, pilot, table_cls, text: str, gap_s: float):
 
 
 async def test_jobs_filter_no_drops_at_600ms_rhythm():
-    """JobsTable filter: typing 'testhello' one char at a time with
-    600 ms gaps must produce 'testhello' verbatim. ANY drop here is a
-    per-stroke synchronous-blocker bug in the rebuild path."""
+    """JobsTable filter: typing 'xenoview' one char at a time with
+    600 ms gaps must produce 'xenoview' verbatim. ANY drop here is a
+    per-stroke synchronous-blocker bug in the rebuild path.
+
+    Bundle-3 B3.4: switched from the historical 'testhello' string.
+    `testhello` contained `l` (App-bound to action_jobs_tail_log on
+    the Jobs tab); Pilot kept focus on the Input so the `l` was
+    harmless here, but the parallel tmux real-terminal recipe could
+    in principle fire tail-log on focus drift. `xenoview` has zero
+    collisions with the App's q/r/a/t/l bindings (the `e` binding
+    on LogTailScreen is modal-only and not reachable during this
+    test).
+    """
     app = RohanBoardApp(config=_minimal_config())
     async with app.run_test() as pilot:
-        await _type_and_assert(app, pilot, JobsTable, "testhello", gap_s=0.6)
+        await _type_and_assert(app, pilot, JobsTable, "xenoview", gap_s=0.6)
 
 
 async def test_nodes_filter_no_drops_at_600ms_rhythm():
@@ -93,7 +103,7 @@ async def test_nodes_filter_no_drops_at_600ms_rhythm():
     4d cherry-pick brings the chunked rebuild + debounce to both."""
     app = RohanBoardApp(config=_minimal_config())
     async with app.run_test() as pilot:
-        await _type_and_assert(app, pilot, NodesTable, "testhello", gap_s=0.6)
+        await _type_and_assert(app, pilot, NodesTable, "xenoview", gap_s=0.6)
 
 
 async def test_jobs_filter_no_drops_at_50ms_rhythm():
@@ -103,7 +113,7 @@ async def test_jobs_filter_no_drops_at_50ms_rhythm():
     delays the actual table rebuild, not the keystroke capture."""
     app = RohanBoardApp(config=_minimal_config())
     async with app.run_test() as pilot:
-        await _type_and_assert(app, pilot, JobsTable, "testhello", gap_s=0.05)
+        await _type_and_assert(app, pilot, JobsTable, "xenoview", gap_s=0.05)
 
 
 async def test_input_during_active_refresh_tick_no_drops():
@@ -182,12 +192,12 @@ async def test_input_during_active_refresh_tick_no_drops():
         await pilot.pause()
         app.snapshot = snap   # kicks the broadcast worker
 
-        for c in "testhello":
+        for c in "xenoview":
             await pilot.press(c)
             await pilot.pause(0.6)
 
         # Settle the debounce + any tail of the broadcast.
         await pilot.pause(0.5)
-        assert inp.value == "testhello", (
+        assert inp.value == "xenoview", (
             f"input dropped chars during heavy broadcast: {inp.value!r}"
         )
