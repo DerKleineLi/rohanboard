@@ -346,6 +346,62 @@ async def test_loading_placeholder_transitions_to_empty_state():
         )
 
 
+async def test_mine_only_flip_clears_then_readds_rows_no_per_row_remove():
+    """Bundle-2 B2.2: a mine_only flip with a populated table must NOT
+    fire `DataTable.remove_row` once per stale row — pre-fix that
+    animated a per-row delete the user could see as stutter at
+    100+ rows. Post-fix the flip wipes `_row_keys`, which trips the
+    wholesale `table.clear()` branch on the next `update_snapshot`."""
+    from textual.widgets import DataTable
+
+    app = RohanBoardApp(config=_minimal_overview_config())
+    async with app.run_test() as pilot:
+        tabbed = app.query_one(TabbedContent)
+        tabbed.active = "jobs"
+        await pilot.pause()
+
+        snap = Snapshot()
+        # Active mode + mine_only False → user sees 5 rows. Flip to
+        # True → 3 rows (just 'hli'). Pre-fix: 2 remove_row calls.
+        snap.jobs = [
+            _job("3001", "hli"),
+            _job("3002", "someone_else"),
+            _job("3003", "hli"),
+            _job("3004", "someone_else"),
+            _job("3005", "hli"),
+        ]
+        snap.cluster_user = "hli"
+        snap.first_tick_done = True
+        app.mine_only = False
+        app.snapshot = snap
+        await pilot.pause(0.4)
+
+        table = app.query_one(JobsTable).query_one("#jobs_table_dt", DataTable)
+        assert table.row_count == 5
+        original_remove_row = DataTable.remove_row
+        remove_row_calls: list[tuple] = []
+
+        def counting_remove_row(self, key):
+            remove_row_calls.append(("remove_row", key))
+            return original_remove_row(self, key)
+
+        DataTable.remove_row = counting_remove_row  # type: ignore[method-assign]
+        try:
+            app.mine_only = True
+            await pilot.pause(0.4)
+        finally:
+            DataTable.remove_row = original_remove_row  # type: ignore[method-assign]
+
+        assert table.row_count == 3, (
+            f"after mine_only=True only 3 'hli' jobs survive; got "
+            f"{table.row_count}"
+        )
+        assert remove_row_calls == [], (
+            f"mine_only flip must rebuild wholesale (no per-row remove); "
+            f"got {len(remove_row_calls)} remove_row calls"
+        )
+
+
 async def test_mine_only_flip_swaps_snapshot_in_recent_mode():
     """Bundle-2 B2.1: in Recent mode, mine_only=True reads from
     snap.recent_jobs_self (sacct -u $USER), mine_only=False reads

@@ -764,6 +764,19 @@ class JobsTable(Widget):
             pill.add_class("-active")
         else:
             pill.remove_class("-active")
+        # Bundle-2 B2.2: force a full table rebuild on the next
+        # `update_snapshot` (driven by App.watch_mine_only's broadcast).
+        # Without this, `update_snapshot`'s chunked loop calls
+        # `table.remove_row` once per stale key — the user sees rows
+        # disappearing one at a time, stuttering at 100+ rows. Clearing
+        # `_row_keys` makes the chunked loop's stale-key set empty AND
+        # trips the `(not self._row_keys and table.row_count > 0)`
+        # branch which calls `table.clear()` in one wholesale operation.
+        # The flip on Recent mode is anyway a snapshot SWAP (B2.1),
+        # not a filter of the same row set, so the in-place delta
+        # would be wrong even without the animation issue.
+        self._row_keys.clear()
+        self._applied_sort = None
         # Phase 4d.2-D: propagate the JobsTable's local state to
         # App.mine_only (which is a reactive the App watches). The App's
         # `watch_mine_only` re-broadcasts the cached snapshot to every
