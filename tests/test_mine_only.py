@@ -123,9 +123,14 @@ async def test_jobs_table_mine_only_filters_to_cluster_user():
 
 
 def test_compact_jobs_filters_to_cluster_user_unit():
-    """Unit-level: construct a CompactJobs with a stub app.mine_only,
-    drive update_snapshot directly, assert the title reflects the
-    filtered count.
+    """Unit-level: construct a CompactJobs, drive update_snapshot
+    directly, assert the title reflects the cluster_user-only count.
+
+    Bundle-2 B2.3: CompactJobs ALWAYS filters to `cluster_user`
+    regardless of `app.mine_only`. Pre-B2.3 a False flip showed all
+    5 jobs; post-B2.3 the Overview card is locked to "yours". See
+    `test_compact_jobs_ignores_app_mine_only_toggle` for the
+    toggle-invariance proof.
 
     Pilot-level testing of CompactJobs through OverviewPanel proved
     racy — the panel's _populate cycle remounts CompactJobs on every
@@ -137,9 +142,6 @@ def test_compact_jobs_filters_to_cluster_user_unit():
     from textual.widgets import Static
     from rohanboard.widgets.overview import CompactJobs
 
-    class _StubApp:
-        mine_only = True
-
     snap = _mixed_snapshot()
 
     class _Harness(App):
@@ -150,18 +152,51 @@ def test_compact_jobs_filters_to_cluster_user_unit():
         async with _Harness().run_test() as pilot:
             await pilot.pause(0.2)
             compact = pilot.app.query_one(CompactJobs)
-            # Pretend the App has a mine_only attr (CompactJobs reads
-            # self.app.mine_only). _Harness inherits App; we inject.
-            pilot.app.mine_only = True   # type: ignore[attr-defined]
             compact.update_snapshot(snap)
             title_str = str(compact.query_one("#title", Static).content)
             assert "3" in title_str, f"expected 3, got {title_str!r}"
             assert "hli" in title_str, f"expected hli, got {title_str!r}"
 
+    import asyncio
+    asyncio.run(go())
+
+
+def test_compact_jobs_ignores_app_mine_only_toggle():
+    """Bundle-2 B2.3: Overview is "your stuff at a glance." The
+    CompactJobs card's row count is invariant to `app.mine_only`."""
+    from textual.app import App
+    from textual.widgets import Static
+    from rohanboard.widgets.overview import CompactJobs
+
+    snap = _mixed_snapshot()    # 5 jobs, 3 by 'hli', 2 by 'someone_else'
+
+    class _Harness(App):
+        def compose(self):
+            yield CompactJobs()
+
+    async def go():
+        async with _Harness().run_test() as pilot:
+            await pilot.pause(0.2)
+            compact = pilot.app.query_one(CompactJobs)
+
+            # mine_only=False on the App — CompactJobs still shows only
+            # the cluster_user's jobs.
             pilot.app.mine_only = False    # type: ignore[attr-defined]
             compact.update_snapshot(snap)
-            title_str = str(compact.query_one("#title", Static).content)
-            assert "5" in title_str, f"expected 5, got {title_str!r}"
+            title_false = str(compact.query_one("#title", Static).content)
+
+            pilot.app.mine_only = True     # type: ignore[attr-defined]
+            compact.update_snapshot(snap)
+            title_true = str(compact.query_one("#title", Static).content)
+
+            # Title count is identical across both toggle positions.
+            assert "3" in title_false, (
+                f"mine_only=False on App must still scope CompactJobs to "
+                f"cluster_user (3 jobs); got {title_false!r}"
+            )
+            assert "3" in title_true, (
+                f"mine_only=True on App should match; got {title_true!r}"
+            )
 
     import asyncio
     asyncio.run(go())

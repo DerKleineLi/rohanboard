@@ -112,24 +112,23 @@ class CompactJobs(Widget):
 
     def update_snapshot(self, snap: Snapshot) -> None:
         body = self.query_one("#body", Static)
+        # Bundle-2 B2.3: Overview is "your stuff at a glance." CompactJobs
+        # UNCONDITIONALLY filters to `cluster_user` regardless of the
+        # global `app.mine_only` toggle. JobsTable's Active+Recent
+        # behavior is unchanged — the toggle still drives those — but
+        # the Overview card is always the user's own jobs.
+        # Cold-start (cluster_user == "") → no jobs match the filter
+        # AND `first_tick_done` is False → render "loading…" below.
         jobs = snap.jobs
-        # Phase 4d.2-D: snapshot.jobs is now ALL users — apply the same
-        # client-side `mine_only` filter the JobsTable does so the
-        # Overview tab's count + body match the "your active jobs"
-        # semantic the user expects. Cold-start (cluster_user=="")
-        # falls through to "show everything" — same conservative
-        # default as JobsTable.
-        try:
-            mine_only = bool(getattr(self.app, "mine_only", True))
-        except Exception:
-            mine_only = True
-        if mine_only and snap.cluster_user:
+        if snap.cluster_user:
             jobs = [j for j in jobs if j.user == snap.cluster_user]
+        else:
+            jobs = []
         title = "Active jobs"
-        if mine_only and snap.cluster_user:
+        if snap.cluster_user:
             title += f"  [dim]({len(jobs)} · {snap.cluster_user})[/dim]"
         else:
-            title += f"  [dim]({len(jobs)})[/dim]"
+            title += f"  [dim](…)[/dim]"
         self.query_one("#title", Static).update(title)
         if not jobs:
             # Bundle-1 Sub-fix-4: discriminate "still fetching" from
@@ -137,8 +136,10 @@ class CompactJobs(Widget):
             # first successful refresh tick lands on `_refresh_all`; on
             # cold start (especially LRZ ProxyJump ~10 s) the user
             # should see "loading…" rather than a confident "no active
-            # jobs" that turns into rows seconds later.
-            if not getattr(snap, "first_tick_done", True):
+            # jobs" that turns into rows seconds later. Cold-start also
+            # implies cluster_user == "" → "loading…" covers both
+            # "haven't fetched yet" and "haven't resolved whoami yet".
+            if not getattr(snap, "first_tick_done", True) or not snap.cluster_user:
                 body.update("[dim italic]loading…[/dim italic]")
             else:
                 body.update("[dim italic]no active jobs[/dim italic]")
