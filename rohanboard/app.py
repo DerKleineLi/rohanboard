@@ -62,6 +62,22 @@ class RohanBoardApp(App):
     # fire on init it races watch_snapshot for the same `exclusive=True`
     # worker slot and one of the two coroutines leaks unawaited.
     mine_only: reactive[bool] = reactive(True, recompose=False, layout=False, init=False)
+    # Phase 4d.2-E step H: mode + sort are now ALSO app-level reactives.
+    # Same architectural rationale as mine_only — a JobsTable click on
+    # the Active/Recent pill (or `t` key) or a column-header sort needs
+    # to fire `_broadcast_snapshot` instead of trying to drive its own
+    # async `update_snapshot(...)` from a sync watcher (which silently
+    # dropped the coroutine — caught by the blackbox v2 report).
+    # Defaults must match JobsTable's own defaults (mode="active",
+    # sort=("job_id", reverse=True)) so the first reactive write doesn't
+    # broadcast a no-op flip. `init=False` skips the watcher on initial
+    # default-value handling (avoids racing watch_snapshot for the same
+    # exclusive worker slot — same gotcha that caught mine_only at first
+    # rollout).
+    mode: reactive[str] = reactive("active", recompose=False, layout=False, init=False)
+    sort: reactive[tuple[str, bool]] = reactive(
+        ("job_id", True), recompose=False, layout=False, init=False,
+    )
 
     def __init__(self, config: Config | None = None) -> None:
         super().__init__()
@@ -547,6 +563,42 @@ class RohanBoardApp(App):
                         jt.mine_only = new
             except Exception:
                 pass
+            coro = self._broadcast_snapshot(getattr(self, "snapshot", Snapshot()))
+            if not getattr(self, "is_running", False):
+                coro.close()
+                return
+            try:
+                self.run_worker(coro, exclusive=True, name="broadcast_snapshot")
+            except Exception:
+                coro.close()
+
+    def watch_mode(self, _old: str, new: str) -> None:
+        """Phase 4d.2-E step H: re-broadcast on mode flip. Mirrors
+        `watch_mine_only`; same guard against firing before the app is
+        running (worker manager not ready → coroutine leaks unawaited).
+        JobsTable.watch_mode flips `self.app.mode = new`, which fires
+        this watcher. The broadcast's per-widget `update_snapshot`
+        reads the JobsTable's already-flipped local `self.mode`, so
+        we don't need to mirror back to each JobsTable here.
+        """
+        with perf_block("click", "mode_app_watcher", extra=f"new={new}"):
+            coro = self._broadcast_snapshot(getattr(self, "snapshot", Snapshot()))
+            if not getattr(self, "is_running", False):
+                coro.close()
+                return
+            try:
+                self.run_worker(coro, exclusive=True, name="broadcast_snapshot")
+            except Exception:
+                coro.close()
+
+    def watch_sort(self, _old: tuple[str, bool], new: tuple[str, bool]) -> None:
+        """Phase 4d.2-E step H: re-broadcast on sort flip. Same shape as
+        `watch_mode` — JobsTable's on_sortable_header_sort_changed
+        updates its own `_sort_col` / `_sort_reverse` synchronously,
+        then flips `self.app.sort = (col, reverse)`, which fires this
+        watcher. The broadcast's per-widget update_snapshot reads the
+        JobsTable's already-flipped local state."""
+        with perf_block("click", "sort_app_watcher", extra=f"new={new}"):
             coro = self._broadcast_snapshot(getattr(self, "snapshot", Snapshot()))
             if not getattr(self, "is_running", False):
                 coro.close()
