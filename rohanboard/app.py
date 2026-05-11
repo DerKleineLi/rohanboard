@@ -91,12 +91,15 @@ class RohanBoardApp(App):
         super().__init__()
         self.cfg = config or load_config()
         self._history: deque[UtilizationSample] = deque(maxlen=HISTORY_CAP)
-        # Bundle-1 Sub-fix-4: sticky "first successful tick has completed"
-        # flag. Stamped onto each snapshot as `first_tick_done` so widgets
-        # can show "loading…" before any success and "no active/recent
-        # jobs" after. Once True, stays True — transient failures don't
-        # regress the user to a "loading…" view.
-        self._first_tick_done: bool = False
+        # Bundle-3 B3.1: per-collector sticky "first successful parse"
+        # flags. Set True the first tick each collector's parse landed
+        # cleanly; once True, stays True across subsequent failures
+        # (transient timeouts don't regress a populated widget to
+        # "loading…"). Stamped onto each snapshot so widgets can gate
+        # their loading-vs-empty placeholder on their own collector.
+        self._jobs_loaded: bool = False
+        self._nodes_loaded: bool = False
+        self._storage_loaded: bool = False
         # Phase 4d.2-E: --debug CLI flag opens a per-tick text log file
         # the user can `tail -f` outside the TUI. Path comes from the
         # ROHANBOARD_DEBUG_LOG env var (set by __main__.py when --debug
@@ -414,6 +417,10 @@ class RohanBoardApp(App):
                 # squeue → jobs
                 try:
                     snap.jobs = slurm.parse_squeue(raw.squeue)
+                    # Bundle-3 B3.1: any successful squeue parse flips
+                    # the sticky jobs_loaded flag so JobsTable +
+                    # CompactJobs stop showing "loading…".
+                    self._jobs_loaded = True
                     # Phase 4d.2-E: surface parser drop count so the user
                     # can see if rows are being silently rejected. Each
                     # squeue row is one line.
@@ -467,6 +474,11 @@ class RohanBoardApp(App):
                         exc = set(self.cfg.slurm.exclude_partitions)
                         nodes = [n for n in nodes if not any(p in exc for p in n.partitions)]
                     snap.nodes = nodes
+                    # Bundle-3 B3.1: scontrol parse succeeded → NodesTable
+                    # stops showing "loading…" (set only on the success
+                    # path; an exception above keeps the flag at its
+                    # prior value, sticky).
+                    self._nodes_loaded = True
                 except Exception as e:
                     snap.errors["nodes"] = str(e)
                 # storage: quota + df-multi + dssusrinfo
@@ -530,6 +542,14 @@ class RohanBoardApp(App):
                         except Exception as e:
                             snap.errors[f"storage:{entry_cfg.label}"] = str(e)
                 snap.storage = entries
+                # Bundle-3 B3.1: at least one storage parse succeeded
+                # (or the user configured no storage at all — sticky
+                # flag flips True so the panel stops showing "loading…"
+                # for a cluster that genuinely has no entries). The
+                # storage section runs even when individual entries
+                # fail; the gate is whether the combined fetch reached
+                # this point.
+                self._storage_loaded = True
 
         # Append to rolling history (only if we got node data).
         if snap.nodes:
@@ -549,14 +569,13 @@ class RohanBoardApp(App):
         # snapshot so JobsTable / CompactJobs can filter `mine_only`
         # client-side without poking the executor at render time.
         snap.cluster_user = cluster_user
-        # Bundle-1 Sub-fix-4: flip the sticky flag on the success path
-        # (raw is not None == combined fetch succeeded; individual
-        # parses may still have failed but those land in snap.errors
-        # and the widget's err-rendering branch shows them instead of
-        # the "loading…" placeholder).
-        if raw is not None:
-            self._first_tick_done = True
-        snap.first_tick_done = self._first_tick_done
+        # Bundle-3 B3.1: stamp the per-collector sticky flags. Each is
+        # flipped inside its own try-block on the first successful
+        # parse; the flag stays True across subsequent failed ticks
+        # (transient timeouts don't regress to "loading…").
+        snap.jobs_loaded = self._jobs_loaded
+        snap.nodes_loaded = self._nodes_loaded
+        snap.storage_loaded = self._storage_loaded
         # Reactive write — synchronously triggers watch_snapshot fan-out.
         with perf_block("refresh", "reactive_set"):
             self.snapshot = snap

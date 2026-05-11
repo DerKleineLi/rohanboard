@@ -317,13 +317,13 @@ async def test_mine_only_empty_state_message_names_the_user():
         tabbed.active = "jobs"
         await pilot.pause()
 
-        # Snapshot with NO 'hli' jobs. Mark first_tick_done=True so we
+        # Snapshot with NO 'hli' jobs. Mark jobs_loaded=True so we
         # test the empty-state path, not Bundle-1 Sub-fix-4's
         # "loading…" placeholder.
         snap = Snapshot()
         snap.jobs = [_job("2001", "alice"), _job("2002", "bob")]
         snap.cluster_user = "hli"
-        snap.first_tick_done = True
+        snap.jobs_loaded = True
         app.mine_only = True
         app.snapshot = snap
         await pilot.pause(0.4)
@@ -355,7 +355,7 @@ async def test_empty_placeholder_text_differs_by_mode():
         await pilot.pause()
 
         # Empty in both modes — no jobs and no recent_jobs.
-        # first_tick_done=True keeps us out of the "loading…" branch
+        # jobs_loaded=True keeps us out of the "loading…" branch
         # (Bundle-1 Sub-fix-4) so we exercise the mode-parametrized
         # empty-state text. Bundle-2 B2.1: both recent snapshots empty
         # so Recent mode renders the empty state regardless of
@@ -365,7 +365,7 @@ async def test_empty_placeholder_text_differs_by_mode():
         snap.recent_jobs_self = []
         snap.recent_jobs_all = []
         snap.cluster_user = ""    # bypass mine_only branch
-        snap.first_tick_done = True
+        snap.jobs_loaded = True
         app.mine_only = False
         app.snapshot = snap
         await pilot.pause(0.3)
@@ -395,7 +395,7 @@ async def test_empty_placeholder_text_differs_by_mode():
 async def test_loading_placeholder_transitions_to_empty_state():
     """Bundle-1 Sub-fix-4: before any successful tick, the JobsTable's
     placeholder reads "loading…". After a successful tick lands an
-    empty snapshot (first_tick_done=True, no jobs), it transitions to
+    empty snapshot (jobs_loaded=True, no jobs), it transitions to
     the empty-state text "no active jobs".
 
     Pre-fix the cold-start window was indistinguishable from
@@ -408,11 +408,11 @@ async def test_loading_placeholder_transitions_to_empty_state():
         tabbed.active = "jobs"
         await pilot.pause()
 
-        # Cold-start snapshot: empty + first_tick_done=False.
+        # Cold-start snapshot: empty + jobs_loaded=False.
         snap_loading = Snapshot()
         snap_loading.jobs = []
         snap_loading.cluster_user = ""
-        snap_loading.first_tick_done = False
+        snap_loading.jobs_loaded = False
         app.mine_only = False
         app.snapshot = snap_loading
         await pilot.pause(0.3)
@@ -428,7 +428,7 @@ async def test_loading_placeholder_transitions_to_empty_state():
         snap_empty = Snapshot()
         snap_empty.jobs = []
         snap_empty.cluster_user = ""
-        snap_empty.first_tick_done = True
+        snap_empty.jobs_loaded = True
         app.snapshot = snap_empty
         await pilot.pause(0.3)
 
@@ -466,7 +466,7 @@ async def test_mine_only_flip_clears_then_readds_rows_no_per_row_remove():
             _job("3005", "hli"),
         ]
         snap.cluster_user = "hli"
-        snap.first_tick_done = True
+        snap.jobs_loaded = True
         app.mine_only = False
         app.snapshot = snap
         await pilot.pause(0.4)
@@ -527,7 +527,7 @@ async def test_mine_only_flip_swaps_snapshot_in_recent_mode():
             _job("9006", "bob"),
         ]
         snap.cluster_user = "hli"
-        snap.first_tick_done = True
+        snap.jobs_loaded = True
         app.mine_only = True
         app.snapshot = snap
         await pilot.pause(0.4)

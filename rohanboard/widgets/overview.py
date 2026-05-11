@@ -118,7 +118,7 @@ class CompactJobs(Widget):
         # behavior is unchanged — the toggle still drives those — but
         # the Overview card is always the user's own jobs.
         # Cold-start (cluster_user == "") → no jobs match the filter
-        # AND `first_tick_done` is False → render "loading…" below.
+        # AND `jobs_loaded` is False → render "loading…" below.
         jobs = snap.jobs
         if snap.cluster_user:
             jobs = [j for j in jobs if j.user == snap.cluster_user]
@@ -131,15 +131,15 @@ class CompactJobs(Widget):
             title += f"  [dim](…)[/dim]"
         self.query_one("#title", Static).update(title)
         if not jobs:
-            # Bundle-1 Sub-fix-4: discriminate "still fetching" from
-            # "fetched, no rows". `first_tick_done` is False until the
-            # first successful refresh tick lands on `_refresh_all`; on
-            # cold start (especially LRZ ProxyJump ~10 s) the user
-            # should see "loading…" rather than a confident "no active
-            # jobs" that turns into rows seconds later. Cold-start also
-            # implies cluster_user == "" → "loading…" covers both
-            # "haven't fetched yet" and "haven't resolved whoami yet".
-            if not getattr(snap, "first_tick_done", True) or not snap.cluster_user:
+            # Bundle-3 B3.1: discriminate "still fetching" from "fetched,
+            # no rows". `jobs_loaded` is False until the first
+            # successful squeue parse; on cold start (especially LRZ
+            # ProxyJump ~10 s) the user should see "loading…" rather
+            # than a confident "no active jobs" that turns into rows
+            # seconds later. Cold-start also implies cluster_user == ""
+            # → "loading…" covers both "haven't fetched yet" and
+            # "haven't resolved whoami yet".
+            if not getattr(snap, "jobs_loaded", True) or not snap.cluster_user:
                 body.update("[dim italic]loading…[/dim italic]")
             else:
                 body.update("[dim italic]no active jobs[/dim italic]")

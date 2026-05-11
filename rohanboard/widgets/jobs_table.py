@@ -631,7 +631,7 @@ class JobsTable(Widget):
                 self._render_empty_placeholder(
                     self._empty_state_message(
                         mine_only, snapshot.cluster_user,
-                        first_tick_done=getattr(snapshot, "first_tick_done", True),
+                        jobs_loaded=getattr(snapshot, "jobs_loaded", True),
                     )
                 )
             return
@@ -727,7 +727,7 @@ class JobsTable(Widget):
             self._render_empty_placeholder(
                 self._empty_state_message(
                     mine_only, snapshot.cluster_user,
-                    first_tick_done=getattr(snapshot, "first_tick_done", True),
+                    jobs_loaded=getattr(snapshot, "jobs_loaded", True),
                 )
             )
         else:
@@ -836,7 +836,7 @@ class JobsTable(Widget):
         self,
         mine_only: bool,
         cluster_user: str,
-        first_tick_done: bool = True,
+        jobs_loaded: bool = True,
     ) -> str:
         """Parametrized empty/no-match placeholder text by mode + filter.
 
@@ -844,12 +844,14 @@ class JobsTable(Widget):
         Filter-mismatch and mine_only branches keep the existing
         breadcrumbs so the user can tell WHY the table is empty.
 
-        Bundle-1 Sub-fix-4: when `first_tick_done` is False AND the
-        filter is empty (so we're not in a no-match state), return
-        "loading…" — the cluster hasn't yielded any data yet and
-        "no active jobs" would falsely imply we know the answer.
+        Bundle-3 B3.1: when `jobs_loaded` is False AND the filter is
+        empty (so we're not in a no-match state), return "loading…"
+        — the cluster's squeue/sacct parsers haven't yielded data
+        yet and "no active jobs" would falsely imply we know the
+        answer. Replaces Bundle-1 Sub-fix-4's coarser `first_tick_done`
+        gate.
         """
-        if not first_tick_done and not self.filter_text:
+        if not jobs_loaded and not self.filter_text:
             return "loading…"
         kind = "active" if self.mode == "active" else "recent"
         if self.filter_text:
@@ -947,7 +949,7 @@ class JobsTable(Widget):
                 self._render_empty_placeholder(
                     self._empty_state_message(
                         mine_only, snapshot.cluster_user,
-                        first_tick_done=getattr(snapshot, "first_tick_done", True),
+                        jobs_loaded=getattr(snapshot, "jobs_loaded", True),
                     )
                 )
             return
@@ -1040,7 +1042,7 @@ class JobsTable(Widget):
             self._render_empty_placeholder(
                 self._empty_state_message(
                     mine_only, snapshot.cluster_user,
-                    first_tick_done=getattr(snapshot, "first_tick_done", True),
+                    jobs_loaded=getattr(snapshot, "jobs_loaded", True),
                 )
             )
         else:

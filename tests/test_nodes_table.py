@@ -186,7 +186,7 @@ async def test_nodes_sort_flip_broadcasts_through_app_reactive():
                  mem_total_mb=128_000, mem_alloc_mb=0, mem_free_mb=128_000,
                  gpus=[]),
         ]
-        snap.first_tick_done = True
+        snap.nodes_loaded = True
         app.snapshot = snap
         await pilot.pause(0.4)
 

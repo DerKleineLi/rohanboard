@@ -580,7 +580,14 @@ class NodesTable(Widget):
             if err:
                 table.add_row(Text(f"⚠ {err}", style="bold red"), *([""] * (n_cols - 1)))
             else:
-                table.add_row(Text("— no node data —", style="dim italic"), *([""] * (n_cols - 1)))
+                # Bundle-3 B3.1: pre-first-parse → "loading…"; after
+                # at least one tick succeeded → "— no node data —".
+                msg = (
+                    "loading…"
+                    if not getattr(snapshot, "nodes_loaded", True)
+                    else "— no node data —"
+                )
+                table.add_row(Text(msg, style="dim italic"), *([""] * (n_cols - 1)))
             return
 
         extras_by_id = self._build_extras_by_id(snapshot.storage)
@@ -633,7 +640,8 @@ class NodesTable(Widget):
 
         if not nodes:
             n_cols = len(self._columns)
-            table.add_row(Text(f"— no nodes match '{self.filter_text}' —", style="dim italic"),
+            placeholder = self._empty_placeholder_text(snapshot)
+            table.add_row(Text(placeholder, style="dim italic"),
                           *([""] * (n_cols - 1)))
 
         try:
@@ -645,6 +653,15 @@ class NodesTable(Widget):
     def watch_filter_text(self, _old: str, _new: str) -> None:
         # No-op: debounce in on_input_changed handles the rebuild.
         return
+
+    def _empty_placeholder_text(self, snapshot: Snapshot) -> str:
+        """Bundle-3 B3.1: pick the placeholder text for an empty
+        NodesTable. `nodes_loaded == False` AND no filter → "loading…"
+        (scontrol parse hasn't landed yet). Otherwise the existing
+        no-match message (with the filter literal) is shown."""
+        if not getattr(snapshot, "nodes_loaded", True) and not self.filter_text:
+            return "loading…"
+        return f"— no nodes match '{self.filter_text}' —"
 
     def _build_extras_by_id(
         self, storage: list[StorageEntry]
@@ -705,7 +722,14 @@ class NodesTable(Widget):
             if err:
                 table.add_row(Text(f"⚠ {err}", style="bold red"), *([""] * (n_cols - 1)))
             else:
-                table.add_row(Text("— no node data —", style="dim italic"), *([""] * (n_cols - 1)))
+                # Bundle-3 B3.1: pre-first-parse → "loading…"; after
+                # at least one tick succeeded → "— no node data —".
+                msg = (
+                    "loading…"
+                    if not getattr(snapshot, "nodes_loaded", True)
+                    else "— no node data —"
+                )
+                table.add_row(Text(msg, style="dim italic"), *([""] * (n_cols - 1)))
             return
 
         extras_by_id = self._build_extras_by_id(snapshot.storage)
@@ -758,7 +782,8 @@ class NodesTable(Widget):
 
         if not nodes:
             n_cols = len(self._columns)
-            table.add_row(Text(f"— no nodes match '{self.filter_text}' —", style="dim italic"),
+            placeholder = self._empty_placeholder_text(snapshot)
+            table.add_row(Text(placeholder, style="dim italic"),
                           *([""] * (n_cols - 1)))
 
         try:
@@ -825,7 +850,13 @@ class NodesSummary(Widget):
             body.update(f"[bold red]⚠ {err}[/bold red]")
             return
         if not snapshot.nodes:
-            body.update("[dim italic]no node data yet[/dim italic]")
+            # Bundle-3 B3.1: distinguish "still fetching" from
+            # "fetched, no data" — pre-first-parse → "loading…", else
+            # the post-parse empty-state text.
+            if not getattr(snapshot, "nodes_loaded", True):
+                body.update("[dim italic]loading…[/dim italic]")
+            else:
+                body.update("[dim italic]no node data yet[/dim italic]")
             return
         t = _cluster_totals(snapshot.nodes)
         cpu_free = t["cpu_total"] - t["cpu_alloc"]

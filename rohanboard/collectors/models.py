@@ -143,10 +143,18 @@ class Snapshot:
     # if whoami hasn't resolved yet (cold start); widgets treat that
     # as "show everything" since we can't tell which row is yours.
     cluster_user: str = ""
-    # Bundle-1 Sub-fix-4: True once a tick's parsers populated jobs +
-    # recent_jobs successfully. Distinguishes "still fetching" (False
-    # → render "loading…" placeholder) from "fetched, no rows" (True →
-    # render "no active/recent jobs"). Set ONLY on the success path of
-    # `_refresh_all`; failed fetches leave it False so a transient
-    # error doesn't pretend to be a known-empty cluster.
-    first_tick_done: bool = False
+    # Bundle-3 B3.1: per-collector sticky "first successful parse"
+    # flags. Each flips True once on the first tick where that
+    # collector returned a parseable result; once True, stays True
+    # across subsequent failed ticks (so a transient timeout doesn't
+    # regress a populated widget to "loading…"). Widgets gate their
+    # "loading…" placeholder on the flag relevant to their data:
+    #   * JobsTable + CompactJobs read `jobs_loaded` (squeue + sacct).
+    #   * NodesTable reads `nodes_loaded` (scontrol show node).
+    #   * StoragePanel reads `storage_loaded` (df + quota + dssusrinfo).
+    # Replaces Bundle-1 Sub-fix-4's coarser `first_tick_done` flag —
+    # per-collector is more truthful when one collector succeeds and
+    # another fails on the same tick.
+    jobs_loaded: bool = False
+    nodes_loaded: bool = False
+    storage_loaded: bool = False

@@ -123,4 +123,4 @@ After respawn, capture-pane after ~10 s to confirm: cluster name in header, Stor
 
 ## Known follow-ups (planned but not yet implemented)
 
-- **JobsTable should show "loading…" placeholder before the first parse completes** (especially on LRZ where parsing is slow at `mine_only=False`). Currently the empty state is indistinguishable from "no jobs found", confusing the user during the cold-tick window. Discriminate via a snapshot field like `snap.jobs_loaded: bool` (default False until first successful parse) and render a "loading…" row in the DataTable while False. Same treatment for NodesTable + StoragePanel if any of them have observably-slow first ticks. Surfaced 2026-05-10 by the user after watching LRZ first paint.
+- (none currently — Bundle 3 B3.1 resolved the "loading…" placeholder follow-up.)
