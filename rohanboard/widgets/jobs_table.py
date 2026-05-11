@@ -487,8 +487,17 @@ class JobsTable(Widget):
             self.query_one(Vertical).mount(new_hdr, before=self.query_one("#jobs_table_dt", DataTable))
             new_hdr.bind_scroll_source(self.query_one("#jobs_table_dt", DataTable))
             new_hdr.set_sort(self._sort_col, "free", self._sort_reverse)
-            if self._last_snapshot is not None:
-                self.update_snapshot(self._last_snapshot)
+            # Phase 4d.2-E step H: do NOT call `self.update_snapshot(...)`
+            # here — it's async, so the coroutine would be silently
+            # dropped from this sync watcher (caught by blackbox v2 as
+            # the 10s `a → t` bug). Instead, flip the App-level `mode`
+            # reactive, which fires `App.watch_mode` → re-broadcast →
+            # this widget's `update_snapshot` runs cleanly under the
+            # broadcast worker.
+            try:
+                self.app.mode = new                  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     def action_toggle_mode(self) -> None:
         self.mode = "recent" if self.mode == "active" else "active"
@@ -562,8 +571,15 @@ class JobsTable(Widget):
                 group=f"apply_filter_jobs_{self.id or id(self)}",
             )
         except Exception:
-            # Fallback (no event loop / test path): run synchronously.
-            self.update_snapshot(self._last_snapshot)
+            # Fallback (no event loop / test path): formerly called
+            # `self.update_snapshot(self._last_snapshot)` synchronously,
+            # which silently dropped the coroutine (Phase 4d.2-E step H).
+            # The legitimate test path runs its own pilot driver and
+            # doesn't hit this fallback in practice; if a future test
+            # NEEDS a synchronous rebuild it should call the helper
+            # directly via `await widget.update_snapshot(snap)` inside
+            # its own pilot.pause()-bracketed sequence.
+            pass
 
     async def _apply_filter_async(self, snapshot: Snapshot) -> None:
         """Async chunked filter+rebuild — `await asyncio.sleep(0)` every
@@ -747,8 +763,13 @@ class JobsTable(Widget):
             self._sort_col = col
             self._sort_reverse = col in ("job_id", "cpu", "gpu", "mem", "nodes", "time", "left")
         self.query_one(SortableHeader).set_sort(self._sort_col, "free", self._sort_reverse)
-        if self._last_snapshot is not None:
-            self.update_snapshot(self._last_snapshot)
+        # Phase 4d.2-E step H: see same comment in `watch_mode`. Flip
+        # the App-level `sort` reactive instead of calling the async
+        # update_snapshot from this sync handler.
+        try:
+            self.app.sort = (self._sort_col, self._sort_reverse)   # type: ignore[attr-defined]
+        except Exception:
+            pass
 
     # ── data ────────────────────────────────────────────────
 
