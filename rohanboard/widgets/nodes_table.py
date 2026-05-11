@@ -487,16 +487,18 @@ class NodesTable(Widget):
         self.query_one(SortableHeader).set_sort(
             self._sort_col, self._sort_metric, self._sort_reverse
         )
-        if self._last_snapshot is not None:
-            # TODO Bundle 2+: route sort flips through an App-level reactive
-            # the same way JobsTable does (Phase 4d.2-E step H.1/H.2). Today
-            # this sync call on the async `update_snapshot` silently drops
-            # the coroutine — same shape as the bug Phase H caught on the
-            # Jobs side. NodesTable doesn't currently use sort-flips via
-            # click in practice (rohan layout pins the header sort), so the
-            # latency hit is latent. Surfaced 2026-05-11 by the Bundle 1
-            # lint script (scripts/lint_sync_call_on_async.py).
-            self.update_snapshot(self._last_snapshot)  # noqa: lint-async-call
+        # Bundle-2 B2.4: route the rebuild through `App.nodes_sort` —
+        # the watcher fires `_broadcast_snapshot` which reaches this
+        # widget's async `update_snapshot` cleanly via run_worker.
+        # Pre-fix called `self.update_snapshot(self._last_snapshot)`
+        # directly from a sync handler, which produced an unawaited
+        # coroutine (same Phase-H bug shape Bundle 1's lint surfaced).
+        try:
+            self.app.nodes_sort = (    # type: ignore[attr-defined]
+                self._sort_col, self._sort_metric, self._sort_reverse,
+            )
+        except Exception:
+            pass
 
     def _insert_filter_fragment(self, fragment: str | None) -> None:
         if not fragment:
@@ -552,13 +554,13 @@ class NodesTable(Widget):
                 group=f"apply_filter_nodes_{self.id or id(self)}",
             )
         except Exception:
-            # TODO Bundle 2+: this fallback was the JobsTable shape that
-            # Phase 4d.2-E step H REMOVED (it silently dropped the coro
-            # in non-event-loop paths and confused tests). NodesTable still
-            # has it. Replace with `pass` once a test demonstrates the
-            # fallback isn't needed in any pilot path. Surfaced 2026-05-11
-            # by the Bundle 1 lint (scripts/lint_sync_call_on_async.py).
-            self.update_snapshot(self._last_snapshot)  # noqa: lint-async-call
+            # Bundle-2 B2.4: no-op fallback (matches JobsTable shape post
+            # Phase 4d.2-E step H). The legitimate test path runs its
+            # own pilot driver and doesn't hit this branch in practice;
+            # a sync call on async `update_snapshot` here silently
+            # dropped the coroutine, which is worse than missing one
+            # filter rebuild.
+            pass
 
     async def _apply_filter_async(self, snapshot: Snapshot) -> None:
         """Async chunked filter+rebuild — `await asyncio.sleep(0)` every

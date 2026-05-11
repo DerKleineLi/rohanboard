@@ -78,6 +78,14 @@ class RohanBoardApp(App):
     sort: reactive[tuple[str, bool]] = reactive(
         ("job_id", True), recompose=False, layout=False, init=False,
     )
+    # Bundle-2 B2.4: NodesTable sort is independent of JobsTable sort
+    # (different column keys + triple-kind metric dimension). Keep
+    # them as separate reactives so a NodesTable header click doesn't
+    # spuriously fire JobsTable's watcher. Default matches NodesTable's
+    # own (name, free, False).
+    nodes_sort: reactive[tuple[str, str, bool]] = reactive(
+        ("name", "free", False), recompose=False, layout=False, init=False,
+    )
 
     def __init__(self, config: Config | None = None) -> None:
         super().__init__()
@@ -637,6 +645,33 @@ class RohanBoardApp(App):
             # `batch_update()` so the user sees the table fill
             # progressively instead of waiting for the whole fanout
             # to commit at once (~5-20 ms first-paint vs ~150 ms full).
+            coro = self._broadcast_snapshot(
+                getattr(self, "snapshot", Snapshot()), batch=False,
+            )
+            if not getattr(self, "is_running", False):
+                coro.close()
+                return
+            try:
+                self.run_worker(coro, exclusive=True, name="broadcast_snapshot")
+            except Exception:
+                coro.close()
+
+    def watch_nodes_sort(
+        self,
+        _old: tuple[str, str, bool],
+        new: tuple[str, str, bool],
+    ) -> None:
+        """Bundle-2 B2.4: re-broadcast on NodesTable sort flip. Mirror
+        of `watch_sort`'s shape — NodesTable's
+        `on_sortable_header_sort_changed` updates its own
+        `_sort_col` / `_sort_metric` / `_sort_reverse` synchronously,
+        then flips `self.app.nodes_sort = (col, metric, reverse)`,
+        which fires this watcher. The broadcast lands at
+        `NodesTable.update_snapshot`, which reads the already-flipped
+        local state and re-renders. Removes the Phase-H bug shape
+        (sync sync-call on async `update_snapshot`) the Bundle-1
+        lint flagged."""
+        with perf_block("click", "nodes_sort_app_watcher", extra=f"new={new}"):
             coro = self._broadcast_snapshot(
                 getattr(self, "snapshot", Snapshot()), batch=False,
             )

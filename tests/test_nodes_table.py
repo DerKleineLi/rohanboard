@@ -130,3 +130,92 @@ def test_norm_kind_empty_kind_returns_vram_or_empty():
     assert _norm_kind("", "80GB") == "80GB"
     # Both empty → empty string (caller decides "—")
     assert _norm_kind("", None) == ""
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Bundle-2 B2.4: NodesTable sort flip routes through App.nodes_sort.
+# Pre-fix the sort handler called the async `update_snapshot` from a
+# sync context (same Phase-H shape Bundle 1's lint surfaced). Post-fix
+# it flips the App reactive, and App.watch_nodes_sort drives the
+# broadcast.
+# ──────────────────────────────────────────────────────────────────────
+
+
+import pytest
+from textual.widgets import TabbedContent
+
+from rohanboard.app import RohanBoardApp
+from rohanboard.collectors.models import Snapshot
+from rohanboard.config import Config, LayoutConfig, TabConfig
+from rohanboard.widgets.nodes_table import NodesTable
+from rohanboard.widgets.sortable_header import SortableHeader
+
+
+def _nodes_config() -> Config:
+    cfg = Config()
+    cfg.exec_spec = "local"
+    cfg.layout = LayoutConfig(tabs=[
+        TabConfig(id="nodes", title="Nodes", widgets=["nodes_table"]),
+    ])
+    cfg.storage_entries = []
+    cfg.presets = {"jobs": [], "nodes": []}
+    return cfg
+
+
+@pytest.mark.asyncio
+async def test_nodes_sort_flip_broadcasts_through_app_reactive():
+    """Bundle-2 B2.4: a NodesTable sort click flips `app.nodes_sort`
+    rather than calling async `update_snapshot` from a sync context.
+    Asserting the App reactive sees the new tuple proves the routing
+    landed (and proves the broadcast worker has a path to schedule
+    the rebuild)."""
+    app = RohanBoardApp(config=_nodes_config())
+    async with app.run_test() as pilot:
+        tabbed = app.query_one(TabbedContent)
+        tabbed.active = "nodes"
+        await pilot.pause()
+
+        snap = Snapshot()
+        snap.nodes = [
+            Node(name="z_last", partitions=["x"], state="IDLE",
+                 cpu_total=64, cpu_alloc=0, cpu_load=0.0,
+                 mem_total_mb=128_000, mem_alloc_mb=0, mem_free_mb=128_000,
+                 gpus=[]),
+            Node(name="a_first", partitions=["x"], state="IDLE",
+                 cpu_total=64, cpu_alloc=0, cpu_load=0.0,
+                 mem_total_mb=128_000, mem_alloc_mb=0, mem_free_mb=128_000,
+                 gpus=[]),
+        ]
+        snap.first_tick_done = True
+        app.snapshot = snap
+        await pilot.pause(0.4)
+
+        nt = app.query_one(NodesTable)
+        # Default sort is ("name", "free", False) — ascending by name.
+        assert app.nodes_sort == ("name", "free", False)
+        # Wrap executor to count any post-flip ssh calls (must be 0;
+        # sort is a re-render, not a refetch).
+        original_run = app.executor.run
+        post_calls: list[tuple] = []
+
+        async def counting_run(argv, timeout=None):
+            post_calls.append((tuple(argv), timeout))
+            return await original_run(argv, timeout=timeout)
+
+        app.executor.run = counting_run    # type: ignore[method-assign]
+
+        # Trigger a sort flip on the "name" column → reverse=True
+        # (descending). Post the SortChanged message through Textual
+        # so the widget's own handler routes it normally.
+        nt.post_message(SortableHeader.SortChanged("name", None))
+        await pilot.pause(0.4)
+
+        # App reactive flipped — broadcast wired up.
+        assert app.nodes_sort == ("name", "free", True), (
+            f"app.nodes_sort should flip to descending after click; "
+            f"got {app.nodes_sort}"
+        )
+        # No refetch.
+        assert post_calls == [], (
+            f"sort flip must not refetch; got {len(post_calls)} ssh calls"
+        )

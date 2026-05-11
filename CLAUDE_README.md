@@ -102,7 +102,7 @@ After respawn, capture-pane after ~10 s to confirm: cluster name in header, Stor
 ## Lint scripts
 
 - **`scripts/lint_sync_call_on_async.py`** (Bundle 1 Sub-fix 5, 2026-05-11) — AST-walks `rohanboard/` for the Phase-H anti-pattern: a sync method calling `self.<async_method>(...)` with the result discarded (coroutine silently dropped). Excludes `@work`-decorated methods (Textual makes them sync-callable). Suppress a known-and-deferred site with a trailing `# noqa: lint-async-call`. Pinned green by `tests/test_lint_sync_call_on_async.py`. Run manually: `uv run python scripts/lint_sync_call_on_async.py`. Not CI-wired yet (user-facing decision deferred).
-- **NodesTable Phase-H carryover** — `rohanboard/widgets/nodes_table.py:491` and `:556` both call sync `self.update_snapshot(self._last_snapshot)` on the async `update_snapshot`. Currently `noqa`-suppressed with TODOs pointing at Bundle 2+. Same shape as the JobsTable bug Phase 4d.2-E step H removed; latency hit is latent (sort flips on Nodes aren't a common click path).
+- **NodesTable Phase-H sister-paths** (Bundle 2 B2.4, 2026-05-11) — `nodes_table.py:on_sortable_header_sort_changed` previously called sync `self.update_snapshot(...)` on the async method (Phase-H bug shape). Now flips `app.nodes_sort: reactive[tuple[str, str, bool]]` and `App.watch_nodes_sort` re-broadcasts. `_apply_filter_debounced`'s exception fallback is a no-op (matches the JobsTable shape Phase 4d.2-E step H established). All Bundle-1 `# noqa: lint-async-call` suppressions in this file are GONE — lint runs naturally green.
 
 ## Testing
 
