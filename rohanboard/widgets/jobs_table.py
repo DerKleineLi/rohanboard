@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 
 from rich.text import Text
@@ -158,10 +159,28 @@ _COLUMNS_ACTIVE = _size_cols(_ACTIVE_RAW)
 _COLUMNS_RECENT = _size_cols(_RECENT_RAW)
 
 
+# Phase 4d.2-E step F.2: sacct rows can carry non-numeric job IDs —
+# array tasks ("1234_5"), step IDs ("1234.batch"), het-job components
+# ("1234+0"). Prior `int(job.job_id)` raised ValueError on those,
+# which the outer `except Exception` swallowed by falling through to
+# `return job.job_id` (a STRING). Result: `jobs.sort` mixed `int` and
+# `str` and raised `TypeError: '<' not supported between instances of
+# 'str' and 'int'`. The exception was then swallowed by the broadcast
+# loop and the table just stopped updating. Caught live on LRZ Recent
+# + mine_only=False where ~50 sacct rows reliably included array tasks.
+_JOBID_LEADING_INT_RE = re.compile(r"^(\d+)")
+
+
 def _sort_value(job: Job, col: str):
     try:
         if col == "job_id":
-            return int(job.job_id)
+            # Parse the leading integer prefix; sort by (prefix, full
+            # string) so all rows return tuples that compare cleanly
+            # regardless of suffix shape. Pure-numeric IDs land as
+            # (N, "N") which still orders by the numeric part first.
+            jid = job.job_id or ""
+            m = _JOBID_LEADING_INT_RE.match(jid)
+            return (int(m.group(1)) if m else -1, jid)
         if col == "cpu":
             return job.num_cpus
         if col == "nodes":
