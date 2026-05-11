@@ -445,8 +445,18 @@ class NodesTable(Widget):
             except (ValueError, IndexError, KeyError):
                 pass
         elif wid == "filter_help":
-            from ..screens.filter_help import FilterHelpModal, NODES_FILTER_SPEC
-            self.app.push_screen(FilterHelpModal(NODES_FILTER_SPEC,
+            from ..screens.filter_help import FilterHelpModal, build_nodes_filter_spec
+            # Bundle-3 B3.3: build the spec per-cluster from
+            # `cfg.nodes_table.columns` so LRZ-style configs (no
+            # `[[nodes_table.columns]]`) don't see rohan-specific
+            # `ssd_free` / `hdd_used` tokens that match nothing.
+            cfg_columns = []
+            try:
+                cfg_columns = list(self.app.cfg.nodes_table.columns)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            spec = build_nodes_filter_spec(cfg_columns)
+            self.app.push_screen(FilterHelpModal(spec,
                                                  on_insert=self._insert_filter_fragment))
         elif wid == "filter_clear":
             self.query_one("#filter", Input).value = ""

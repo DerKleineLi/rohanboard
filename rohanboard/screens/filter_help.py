@@ -151,24 +151,52 @@ class FilterHelpModal(ModalScreen[None]):
         self.dismiss(None)
 
 
-NODES_FILTER_SPEC = FilterHelpSpec(
-    title="Nodes",
-    text_fields=["name", "state", "partitions", "gpu_kind"],
-    numeric_fields=[
+def build_nodes_filter_spec(cfg_columns=None) -> "FilterHelpSpec":
+    """Bundle-3 B3.3: per-cluster Nodes filter help. The base numeric
+    fields (cpu/gpu/mem) are universal; the storage fields and one
+    example token are built from `cfg.nodes_table.columns` so a cluster
+    that doesn't declare `[[nodes_table.columns]]` (e.g. LRZ) doesn't
+    see rohan-specific `ssd_free` / `hdd_used` tokens that match nothing
+    on its tree.
+
+    `cfg_columns` is a list of `NodesTableColumnConfig` (or anything
+    with `.id` + `.header` attrs); pass `None` / `[]` to get the
+    generic fallback.
+    """
+    cfg_columns = list(cfg_columns or [])
+    base_numeric = [
         "cpu_free", "cpu_alloc", "cpu_total",
         "gpu_free", "gpu_alloc", "gpu_total",
         "mem_free", "mem_alloc", "mem_total",
-        "ssd_free", "ssd_used", "ssd_total",
-        "hdd_free", "hdd_used", "hdd_total",
-    ],
-    examples=[
+    ]
+    per_column_numeric: list[str] = []
+    for col in cfg_columns:
+        per_column_numeric.extend([
+            f"{col.id}_free", f"{col.id}_used", f"{col.id}_total",
+        ])
+
+    examples = [
         "a6000 gpu_free>=1         rtx_a6000 nodes with free GPU",
         "state==IDLE               exact match (excludes IDLE+DRAIN)",
         "gpu_kind:a6000|a100       either GPU family",
-        "ssd_free>=1T              ≥ 1 TiB of SSD free",
-        "a100 mem_free>=500G       a100 with big mem headroom",
-    ],
-)
+    ]
+    if cfg_columns:
+        first = cfg_columns[0]
+        examples.append(
+            f"{first.id}_free>=1T              ≥ 1 TiB of {first.header} free"
+        )
+    else:
+        examples.append(
+            "mem_free>=500G            nodes with ≥ 500 GiB mem headroom"
+        )
+    examples.append("a100 mem_free>=500G       a100 with big mem headroom")
+
+    return FilterHelpSpec(
+        title="Nodes",
+        text_fields=["name", "state", "partitions", "gpu_kind"],
+        numeric_fields=base_numeric + per_column_numeric,
+        examples=examples,
+    )
 
 JOBS_FILTER_SPEC = FilterHelpSpec(
     title="Jobs",
