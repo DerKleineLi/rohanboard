@@ -175,15 +175,15 @@ class RohanBoardApp(App):
 
     async def on_mount(self) -> None:
         self._apply_size_class(self.size.width)
-        # Resolve `users = ["self"]` ONCE up front via `whoami` over the
-        # executor — this gives the REMOTE username (e.g. "di35dob" on
-        # ssh:lrz) instead of the WSL-side $USER ("hli"). Caches on the
-        # executor; subsequent ticks read it from cache for free. Empty
-        # string fallback keeps the app usable if whoami fails.
-        try:
-            await self.executor.resolve_whoami(timeout=20.0)
-        except Exception:
-            pass
+        # Bundle-1 Sub-fix-3: whoami no longer blocks on_mount. The
+        # combined collector includes a `whoami` section so REMOTE
+        # username arrives WITH the first tick instead of one ssh
+        # round-trip BEFORE it. Cold LRZ ProxyJump was ~10 s for the
+        # standalone whoami + ~10 s for the first tick = ~20 s blank
+        # window before any frame; this collapses both into one ~10 s
+        # window. Mine_only filter on the very first frame falls
+        # through to "show everything" until whoami parses (existing
+        # cold-start behavior — `test_cold_start_no_cluster_user_shows_everything`).
         # Kick off the first refresh as a worker (decorator-driven); UI
         # paints the empty snapshot immediately and the first real tick
         # writes self.snapshot when it lands.
@@ -378,6 +378,20 @@ class RohanBoardApp(App):
         except Exception as e:
             snap.errors["combined"] = str(e)
             raw = None
+
+        # Bundle-1 Sub-fix-3: absorb the whoami section into the
+        # executor's `_whoami` cache so subsequent ticks see it (quota
+        # `users=["self"]` resolution + JobsTable's mine_only filter
+        # both read it via `getattr(executor, '_whoami', ...)`). Empty
+        # string when the section was absent / failed.
+        if raw is not None and raw.whoami:
+            new_whoami = raw.whoami.strip().splitlines()[-1].strip() if raw.whoami.strip() else ""
+            if new_whoami and new_whoami != cluster_user:
+                cluster_user = new_whoami
+                try:
+                    self.executor._whoami = cluster_user
+                except Exception:
+                    pass
 
         if raw is not None:
             with perf_block("refresh", "parse"):

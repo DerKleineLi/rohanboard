@@ -238,6 +238,41 @@ async def test_fetch_combined_quota_skipped_when_no_user():
     assert "quota -u" not in script
 
 
+async def test_fetch_combined_includes_whoami_section():
+    """Bundle-1 Sub-fix-3: the combined script unconditionally includes
+    a `whoami` section so REMOTE username arrives WITH the first tick
+    instead of needing a serial `resolve_whoami` round-trip first."""
+    fake = _FakeExecutor(response=(
+        0,
+        f"{SECTION_DELIM}mounts\n{SECTION_END}\n"
+        f"{SECTION_DELIM}nodes\n{SECTION_END}\n"
+        f"{SECTION_DELIM}whoami\n"
+        "di35dob\n"
+        f"{SECTION_END}\n"
+        f"{SECTION_DELIM}squeue\n{SECTION_END}\n"
+        f"{SECTION_DELIM}sacct\n{SECTION_END}\n",
+        "",
+    ))
+    raw = await fetch_combined(
+        fake,
+        quota_user=None,
+        df_explicit_paths=[],
+        df_prefix_globs=[],
+        squeue_format="x",
+        squeue_users=None,
+        sacct_format="y",
+        sacct_starttime="now",
+        sacct_users=None,
+    )
+    script = fake.calls[0][0][2]
+    # Whoami runs in the parallel block.
+    assert "( whoami > " in script, (
+        f"whoami section missing from script:\n{script}"
+    )
+    # Parser extracts it.
+    assert raw.whoami.strip() == "di35dob", f"got raw.whoami={raw.whoami!r}"
+
+
 def test_fetch_combined_raises_on_wrapper_failure():
     """rc != 0 from the bash wrapper itself (e.g. mktemp failure) should
     propagate as RuntimeError — caller's tick records it in snap.errors

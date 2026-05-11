@@ -42,6 +42,12 @@ class CombinedRaw:
     sacct: str = ""
     nodes: str = ""
     dssusrinfo: str = ""
+    # Bundle-1 Sub-fix-3: REMOTE whoami piggybacks on the combined tick
+    # so the first useful frame is one ssh round-trip away, not two.
+    # Pre-fix `on_mount` did a serial `resolve_whoami` (~10 s on cold
+    # LRZ ProxyJump) BEFORE kicking the first refresh, doubling the
+    # cold-start time. Stripped of any trailing newline by callers.
+    whoami: str = ""
 
 
 # Section key → list of shell command strings to run in the remote bash.
@@ -112,6 +118,7 @@ def parse_combined(text: str) -> CombinedRaw:
         sacct="\n".join(sections.get("sacct", [])),
         nodes="\n".join(sections.get("nodes", [])),
         dssusrinfo="\n".join(sections.get("dssusrinfo", [])),
+        whoami="\n".join(sections.get("whoami", [])),
     )
 
 
@@ -139,6 +146,11 @@ async def fetch_combined(
     sections: SectionMap = {
         "mounts": "cat /proc/mounts",
         "nodes": "scontrol show node --all",
+        # Bundle-1 Sub-fix-3: REMOTE whoami piggybacks on every tick so
+        # the cold-start window doesn't double up (pre-fix `on_mount`
+        # ran a serial `resolve_whoami` BEFORE the first refresh — two
+        # ssh round-trips in series on a cold ProxyJump).
+        "whoami": "whoami",
     }
     if quota_user:
         sections["quota"] = f"quota -u {shlex.quote(quota_user)}"
