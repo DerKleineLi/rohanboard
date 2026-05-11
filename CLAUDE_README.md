@@ -8,6 +8,24 @@ This file is the project-local runbook for `rohanboard` on `clean-reimpl-v2`. Re
 
 This is load-bearing for architectural decisions. The data path (5 s tick, snapshot reactive, fanout broadcast) is decoupled from the render path on purpose — clicks should re-render from the cached snapshot, not refetch. When proposing optimizations, anchor on "what does the USER see in the first 200 ms" rather than "what's the total wall-clock to full table re-render". Phase 4d.2-E step 2.5 added `perf_block` instrumentation for this — run with `--debug` (or `ROHANBOARD_PERF_LOG=…`), the `filter/<path>_<mode>` rows carry `first_50_ms=…` and `chunks=…` extras so the breakdown is mechanical, not eyeballed.
 
+## Architectural invariants (post-4d.2-E, 2026-05-11) — load-bearing rules
+
+These rules were established by Phase F+H+A+G and MUST be honored by any future render-path change.
+
+- **Snapshot-broadcast is the only render path.** Every widget update goes through `App._broadcast_snapshot(snap, *, batch=…)`. Click handlers MUST NOT call `widget.update_snapshot(...)` directly — `update_snapshot` is `async def`, sync callers silently drop the coroutine. Phase H caught three such sites; all now route through App-level reactives. If you find a new `self.update_snapshot(...)` call from a sync context, that's a bug. Anchor file: `rohanboard/app.py:_broadcast_snapshot`.
+
+- **Click-driven state changes flip App reactives, never the widget's own.** Three currently exist: `app.mine_only`, `app.mode`, `app.sort` (all in `rohanboard/app.py`, near line 64). Each has a matching `App.watch_*` watcher that calls `_broadcast_snapshot(snap, batch=False)`. To add a new click-driven state, follow the same pattern: class-level reactive + matching watcher + `batch=False` broadcast. Don't invent a new fanout mechanism.
+
+- **Tick-driven broadcasts use `batch=True` (default); click-driven use `batch=False`.** The 5 s/15 s refresh tick wraps the fanout in `batch_update()` to avoid per-widget flicker when ~10 widgets repaint at once with fresh data. Click broadcasts skip `batch_update()` so the first 50 DataTable rows paint as soon as the widget's chunked rebuild yields them, instead of waiting for the whole fanout to commit. The two paths are NOT interchangeable — flipping a tick to batch=False risks flicker; flipping a click to batch=True restores the old 1000 ms+ visible latency. See `rohanboard/app.py:_broadcast_snapshot` for the `contextlib.nullcontext()` idiom.
+
+- **`OverviewPanel._relayout` cache is split into TWO keys.** `layout_key = (mode, util_side, show_ascii, fit, compact_jobs_flex)` triggers `_populate` (full tear-down + re-mount cycle). `height_key = (target, ascii_budget, nodesummary_extra, home_extra)` triggers `_apply_heights` (in-place `widget.styles.height = …`). If a future change adds a new layout-decision field, decide: does it affect which widgets are mounted / in which slot / with which class? → `layout_key`. Does it only resize existing widgets? → `height_key`. Putting a cheap height change into the layout_key resurrects the ~830 ms paint cascade Phase A closed. Anchor file: `rohanboard/widgets/overview.py:_relayout` + `_apply_heights`.
+
+- **Error logging in `_broadcast_snapshot`'s `except Exception` is ALWAYS additive — never substitutive.** Traceback to `_debug_log` (debug.log file) AND `self.log()` (Textual internal) AND perf-row to perf.log. Phase F.1 caught the prior shape (`if perf_enabled(): perf_log_error else: traceback`) which silently swallowed 1192 JobsTable errors over a 73-minute live session. Generalize the rule: if `perf_enabled()` or `--debug` gates extra logging, the gate must add to the diagnostic surface, never replace another diagnostic.
+
+- **Job-ID sort keys are tuples, never raw int or str.** Slurm sacct can return array-task IDs (`5641869_[1-10]`), step IDs (`1234.batch`), het-job components (`1234+0`). `int(job_id)` raises on those; mixing int and str return values in the same `list.sort()` raises `TypeError`. Use the `(int_prefix, full_id_string)` pattern from `_JOBID_LEADING_INT_RE` + `_sort_value` in `rohanboard/widgets/jobs_table.py`. Pinned by `tests/test_jobs_table_sort.py` (7 cases including mixed-collection sort-without-TypeError).
+
+- **Black-box measurement is the canonical perf surface for "is this click fast enough" questions, not `perf_block`.** `perf_block` measures code-execution time (~125–195 ms for a typical broadcast). The user's perception is visible-content time, which can lag code by ~5 ms (post-G) to ~875 ms (pre-G batch_update cascade). For any latency claim, drive the keystroke via `tmux send-keys`, capture-pane on an absolute-deadline schedule (e.g. `[20, 50, 100, 200, 350, 500, 750, 1000, …]` ms from T0), and report the first dt where the target content first appears. tmux's pane-buffer poll cadence appears to be ~100–200 ms — that's the floor of what this harness can detect. The throwaway harnesses `/tmp/blackbox_click.py` and `/tmp/blackbox_seq.py` are reusable templates.
+
 ## Project location + branch
 
 - **Path:** `~/workspace/rohanboard-local/` on WSL.
@@ -41,6 +59,12 @@ This is load-bearing for architectural decisions. The data path (5 s tick, snaps
   - `kind = "dssusrinfo"` (LRZ login) accepts `mode = "home"` (uses `dssusrinfo dsshome`) or `mode = "container"` with `container = "<name>"` (uses `dssusrinfo container_usage`). Parser is tolerant: empty input / unknown container / unbounded total all return None so a transient hiccup doesn't crash the tick.
   - Combined-collector gotcha: a section value with `;` chained commands MUST be wrapped in an inner `( ... )` subshell — `( a; b ) > FILE` redirects the whole subshell, but `( a; b > FILE )` only redirects `b`. Multi-subcommand sections without the wrap silently drop the first command's output. Locked by `test_fetch_combined_dssusrinfo_section_uses_inner_subshell`.
   - LRZ TOML now: home (dssusrinfo dsshome) + scratch (df aggregate — dssusrinfo doesn't cover scratch) + MCML DSS (dssusrinfo container_usage). Smoke verified: home 89%, scratch 78%, persistent 98%.
+- **Phase 4d.2-E** (landed 2026-05-11): perceived-latency overhaul. Six commits in two clusters:
+  - **F.1 / F.2** — diagnostic fix + non-numeric job-ID sort. `_broadcast_snapshot`'s error handler made traceback emission additive (never substitutive over the perf-row error marker) — caught 1192 silent `widget,JobsTable,error` rows over a 73-min live session. Root cause then revealed as `_sort_value` raising `TypeError` because sacct returned array-task / step / het IDs that didn't `int()`-parse; fix returns `(int_prefix, full_id_string)` tuples so all sort keys are comparable. Pinned by `tests/test_jobs_table_sort.py`.
+  - **H.1 / H.2** — `app.mode` + `app.sort` reactives + delete three sync `self.update_snapshot(...)` calls on the async `update_snapshot`. Reproduced the user's 10 s `a → t` outlier (silent dropped coroutine waiting for next 15 s tick to land); after fix the worst-case visible-time dropped from 13013 ms → 3062 ms.
+  - **A** — `OverviewPanel._relayout` cache-key split into `layout_key` (mounts) and `height_key` (in-place styles). Bare `_job_count` flips that don't cross thresholds now skip `_populate` entirely. Helps mode flips (zero `_job_count` change) most; heavy Mine→All flips that cross the util_side threshold still remount (unavoidable — UtilizationPanel actually moves columns).
+  - **G** — `_broadcast_snapshot(snap, *, batch=True)` parameterized. Tick path keeps default (flicker-free 5 s/15 s refresh); click watchers pass `batch=False` for progressive paint. Closes the ~830 ms gap between fanout/all end and first-visible content.
+  - Black-box measurements: LRZ user `a → 3 s wait → t` composite worst-case 13013 ms (pre) → 3026 ms (post). `vis_t` since-`t` 6500 ms blank → 100 ms. `vis_a` 1500 ms → 200–500 ms. Tick stability unaffected.
 - **Phase 4e+** (not yet started): multi-cluster SSH wiring.
 
 ## Layout defaults
@@ -72,7 +96,7 @@ After respawn, capture-pane after ~10 s to confirm: cluster name in header, Stor
 
 ## Testing
 
-- **Unit + Pilot tests:** `uv run pytest tests/`. As of 2026-05-10 (post-4d.2-C): 86/86 passing.
+- **Unit + Pilot tests:** `uv run pytest tests/`. As of 2026-05-11 (post-4d.2-E): 111/111 passing.
 - **Filter-drop regression test:** `tests/test_input_drops.py` exercises both 600 ms (synchronous-blocker) and 50 ms (debounce-coalesce) rhythms on JobsTable and NodesTable filters. The 600 ms test is the canonical drops repro per `~/.claude/projects/-home-hli/memory/rohanboard.md` §"Filter-bar character-drop variant".
 - **Live tmux drops test:** see the memory file for byte-offset oracle / SGR mouse-click recipes if you need to repro on a real terminal.
 
