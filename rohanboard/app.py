@@ -596,12 +596,21 @@ class RohanBoardApp(App):
                     if inspect.isawaitable(result):
                         await result
                 except Exception:
+                    # Phase 4d.2-E step F.1: ALWAYS log the traceback —
+                    # the perf-row error marker is a fast-grep hook, NOT
+                    # a substitute. Prior shape gated traceback-log
+                    # behind `else` of perf_enabled(), which meant
+                    # `--debug` sessions silently swallowed the very
+                    # exceptions the diagnostic was meant to surface.
+                    import traceback
+                    tb = traceback.format_exc()
+                    self._debug_log(
+                        f"update_snapshot failed for {type(widget).__name__}:\n{tb}"
+                    )
+                    self.log(f"update_snapshot failed for {widget!r}\n{tb}")
                     if perf_enabled():
                         perf_log("widget", type(widget).__name__,
                                  (_t.perf_counter() - t0) * 1000, extra="error")
-                    else:
-                        import traceback
-                        self.log(f"update_snapshot failed for {widget!r}\n{traceback.format_exc()}")
                     continue
                 if perf_enabled():
                     perf_log("widget", type(widget).__name__,
