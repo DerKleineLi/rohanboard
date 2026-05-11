@@ -5,10 +5,20 @@ stdout / stderr each have their own RichLog and tail their files on a 1 s
 poll regardless of which tab is active — switching tabs is instant.  script
 and env are fetched once on mount in the background and rendered to their
 own RichLogs as soon as the result lands.
+
+Bundle-3 B3.5 (2026-05-11): tail goes through the executor, not local
+Path I/O. Pre-B3.5 the screen called `path.exists()` / `path.open()`
+directly — fine on `exec = "local"`, broken on `exec = "ssh:rohan"`
+because the slurm log path lives on the cluster and the WSL host
+can't see it (caused "[file does not exist yet]" on every poll). Now
+each poll runs a small bash `stat + tail -c` over the executor, which
+multiplexes onto the same SSH connection the collectors use. Repeated
+identical errors (missing file, exec failure) are deduped per stream.
 """
 from __future__ import annotations
 
 import asyncio
+import shlex
 from pathlib import Path
 
 from textual import events
@@ -20,6 +30,59 @@ from textual.widgets import Footer, RichLog, Static, TabbedContent, TabPane
 
 from ..collectors import slurm
 from ..exec import Executor
+
+
+# Initial fetch budget: read the trailing 64 KiB (≈hundreds of lines) so
+# the user lands on recent output rather than the beginning of a long log.
+_INITIAL_TAIL_BYTES = 64 * 1024
+
+
+def _build_tail_script(path: str, cursor: int, initial_bytes: int = _INITIAL_TAIL_BYTES) -> str:
+    """Single bash one-liner that prints:
+      * `__MISSING__` (and nothing else) if `path` doesn't exist;
+      * `__SIZE__=<bytes>\\n` first, then the new content from `cursor`;
+      * On detected rotation (size < cursor) prepends `__ROTATED__\\n`
+        before the new content and rewinds to the trailing
+        `initial_bytes`.
+
+    One ssh round-trip per poll per stream. Output is parsed by
+    `_parse_tail_output` below.
+    """
+    qp = shlex.quote(path)
+    return (
+        f"if [ ! -f {qp} ]; then echo __MISSING__; exit 0; fi; "
+        f"s=$(stat -c %s {qp} 2>/dev/null); "
+        f"echo \"__SIZE__=$s\"; "
+        f"if [ \"$s\" -lt {cursor} ]; then "
+        f"  echo __ROTATED__; tail -c {initial_bytes} {qp}; "
+        f"elif [ \"$s\" -gt {cursor} ]; then "
+        f"  tail -c +{cursor + 1} {qp}; "
+        f"fi"
+    )
+
+
+def _parse_tail_output(stdout: str) -> tuple[str, int | None, str]:
+    """Parse `_build_tail_script` output. Returns
+    `(status, new_size, content)`:
+      * status: "missing" | "ok" | "rotated" | "malformed"
+      * new_size: file's current size in bytes, or None for missing.
+      * content: bytes after the cursor (or last 64K on rotation).
+    """
+    if stdout.startswith("__MISSING__"):
+        return "missing", None, ""
+    lines = stdout.split("\n", 2)   # split off header lines (max 3 splits)
+    if not lines or not lines[0].startswith("__SIZE__="):
+        return "malformed", None, ""
+    try:
+        size = int(lines[0].removeprefix("__SIZE__="))
+    except ValueError:
+        return "malformed", None, ""
+    rest = "\n".join(lines[1:]) if len(lines) > 1 else ""
+    if rest.startswith("__ROTATED__\n"):
+        return "rotated", size, rest[len("__ROTATED__\n"):]
+    if rest == "__ROTATED__":
+        return "rotated", size, ""
+    return "ok", size, rest
 
 
 TABS: tuple[str, ...] = ("stdout", "stderr", "script", "info")
@@ -109,10 +172,17 @@ class LogTailScreen(ModalScreen):
         self.job_id = job_id
         self.executor = executor
         self._info: dict[str, str] = {}
-        # Per-stream file handles + polling state
-        self._fh: dict[str, object | None] = {"stdout": None, "stderr": None}
-        self._path: dict[str, Path | None] = {"stdout": None, "stderr": None}
+        # Bundle-3 B3.5: executor-routed tail state. The cursor is the
+        # byte offset already-shown for each stream; the path string is
+        # resolved from scontrol's StdOut/StdErr once on mount.
+        # `last_error` dedups repeated identical failure messages — set
+        # on print, cleared on a successful read.
+        self._cursor: dict[str, int] = {"stdout": 0, "stderr": 0}
+        self._path: dict[str, str | None] = {"stdout": None, "stderr": None}
+        self._opened: dict[str, bool] = {"stdout": False, "stderr": False}
+        self._last_error: dict[str, str | None] = {"stdout": None, "stderr": None}
         self._poll_handle = None
+        self._poll_in_flight: bool = False
         # script cache — populated by background fetch
         self._script_done = False
 
@@ -141,23 +211,22 @@ class LogTailScreen(ModalScreen):
             self._write("stdout", f"[error] no job info returned for job {self.job_id}")
             return
         self._update_header()
-        # Prime stdout + stderr by opening their files now.  Both poll in the
-        # background; switching tabs only changes which RichLog is visible.
-        self._open_stream("stdout")
-        self._open_stream("stderr")
-        self._poll_handle = self.set_interval(1.0, self._poll)
+        # Bundle-3 B3.5: resolve paths now (synchronous from the info
+        # dict); the first poll fetches initial content via the
+        # executor. Both streams poll in the background; switching
+        # tabs only changes which RichLog is visible.
+        self._announce_stream("stdout")
+        self._announce_stream("stderr")
+        self._poll_handle = self.set_interval(1.0, self._kick_poll)
+        # Kick a poll immediately so the user sees content on open
+        # instead of waiting up to 1 s for the first interval fire.
+        asyncio.create_task(self._poll_async())
         # Render info tab synchronously from the dict we already have.
         self._render_info()
         # Background-fetch script
         asyncio.create_task(self._fetch_script())
 
     def on_unmount(self) -> None:
-        for fh in self._fh.values():
-            if fh is not None:
-                try:
-                    fh.close()
-                except Exception:
-                    pass
         if self._poll_handle is not None:
             self._poll_handle.stop()
 
@@ -178,53 +247,143 @@ class LogTailScreen(ModalScreen):
 
     # ── stdout / stderr — file-tail loop ──
 
-    def _path_for(self, stream: str) -> Path | None:
+    def _path_for(self, stream: str) -> str | None:
+        """Resolve the remote (or local) path for a stream from scontrol's
+        StdOut/StdErr field. Returns None when scontrol didn't report
+        one (no `--output=` and no default; rare)."""
         key = "StdOut" if stream == "stdout" else "StdErr"
         raw = self._info.get(key)
         if not raw:
             return None
-        return Path(_substitute_slurm_path(raw, self._info))
+        # Substitution still happens in Python — the cluster has already
+        # written the file with the expanded name; bash doesn't expand
+        # `%j` / `%x` on its own.
+        return _substitute_slurm_path(raw, self._info)
 
-    def _open_stream(self, stream: str) -> None:
+    def _announce_stream(self, stream: str) -> None:
+        """One-shot header: '[STDOUT: /path/to/log]' or '[no STDOUT path
+        on file]'. Called once per mount; poll loop handles the rest."""
         path = self._path_for(stream)
         log = self.query_one(f"#log_{stream}", RichLog)
         if path is None:
-            log.write(f"[no {stream.upper()} path on file]")
+            self._maybe_write_error(stream, "no_path",
+                                    f"[no {stream.upper()} path on file]")
             return
         self._path[stream] = path
         log.write(f"[{stream.upper()}: {path}]")
-        if not path.exists():
-            log.write(f"[file does not exist yet: {path}]")
-            return
-        try:
-            fh = path.open("r", errors="replace")
-            lines = fh.readlines()
-            fh.seek(0, 2)
-            self._fh[stream] = fh
-            for line in lines[-200:]:
-                log.write(line.rstrip("\n"))
-        except OSError as e:
-            log.write(f"[open failed: {e}]")
-            self._fh[stream] = None
 
-    def _poll(self) -> None:
-        for stream in ("stdout", "stderr"):
-            fh = self._fh.get(stream)
-            if fh is None:
-                # File may have appeared since we last tried (e.g. job started
-                # writing).  Re-attempt open.
-                self._open_stream(stream)
-                continue
-            log = self.query_one(f"#log_{stream}", RichLog)
+    def _maybe_write_error(self, stream: str, kind: str, msg: str) -> None:
+        """Bundle-3 B3.5 Bug 2: dedup repeated identical error messages
+        per stream. Same `kind` as the last shown error → suppress.
+        Different kind (or first-time-since-success) → print and remember.
+        Cleared on `_clear_error_dedup` after a successful read so a
+        re-failure does print once more."""
+        if self._last_error.get(stream) == kind:
+            return
+        self._last_error[stream] = kind
+        try:
+            self.query_one(f"#log_{stream}", RichLog).write(msg)
+        except Exception:
+            pass
+
+    def _clear_error_dedup(self, stream: str) -> None:
+        self._last_error[stream] = None
+
+    def _kick_poll(self) -> None:
+        """Sync entry from `set_interval` — schedule the async poller
+        but never let two in-flight polls overlap (slow ssh tick →
+        skip rather than queue)."""
+        if self._poll_in_flight:
+            return
+        asyncio.create_task(self._poll_async())
+
+    async def _poll_async(self) -> None:
+        if self._poll_in_flight:
+            return
+        self._poll_in_flight = True
+        try:
+            await asyncio.gather(
+                self._poll_stream("stdout"),
+                self._poll_stream("stderr"),
+                return_exceptions=True,
+            )
+        finally:
+            self._poll_in_flight = False
+
+    async def _poll_stream(self, stream: str) -> None:
+        """One poll for one stream — runs the bash tail script over the
+        executor, parses, writes new content to the RichLog. Handles
+        missing-file / rotation / exec-failure states with dedup."""
+        path = self._path[stream]
+        if path is None:
+            # No path resolved at mount → nothing to do, header already
+            # noted via _announce_stream.
+            return
+        cursor = self._cursor[stream]
+        first_open = not self._opened[stream]
+        # On first open, treat cursor=0 specially so we get the tail
+        # (last 64K) instead of streaming from the beginning of a
+        # potentially-huge file.
+        if first_open and cursor == 0:
+            script_path = shlex.quote(path)
+            # __MISSING__-aware preamble (mirrors `_build_tail_script`)
+            # plus a `tail -c <budget>` initial read; on success we set
+            # the cursor to the file size so subsequent polls pick up
+            # only NEW bytes after this snapshot.
+            script = (
+                f"if [ ! -f {script_path} ]; then echo __MISSING__; exit 0; fi; "
+                f"s=$(stat -c %s {script_path} 2>/dev/null); "
+                f"echo \"__SIZE__=$s\"; "
+                f"tail -c {_INITIAL_TAIL_BYTES} {script_path}"
+            )
+        else:
+            script = _build_tail_script(path, cursor)
+        try:
+            rc, stdout, stderr = await self.executor.run(
+                ["bash", "-c", script], timeout=10.0,
+            )
+        except Exception as e:
+            self._maybe_write_error(
+                stream, "exec_failed",
+                f"[exec failed for {path}: {type(e).__name__}: {e}]",
+            )
+            return
+        if rc != 0:
+            self._maybe_write_error(
+                stream, "exec_rc",
+                f"[exec rc={rc} for {path}: {stderr.strip()[:200]}]",
+            )
+            return
+        status, size, content = _parse_tail_output(stdout)
+        if status == "missing":
+            self._maybe_write_error(
+                stream, "missing",
+                f"[file does not exist yet: {path}]",
+            )
+            return
+        if status == "malformed":
+            self._maybe_write_error(
+                stream, "malformed",
+                f"[tail produced unexpected output for {path}]",
+            )
+            return
+        # Success path — clear any prior dedup so a NEXT failure
+        # re-prints once.
+        self._clear_error_dedup(stream)
+        self._opened[stream] = True
+        if status == "rotated":
             try:
-                new = fh.read()
-            except OSError as e:
-                log.write(f"[read failed: {e}]")
-                continue
-            if not new:
-                continue
-            for line in new.splitlines():
+                self.query_one(f"#log_{stream}", RichLog).write(
+                    f"[file rotated; resuming from end of new file: {path}]"
+                )
+            except Exception:
+                pass
+        if content:
+            log = self.query_one(f"#log_{stream}", RichLog)
+            for line in content.splitlines():
                 log.write(line)
+        if size is not None:
+            self._cursor[stream] = size
 
     # ── script / env — one-shot async fetch ──
 
