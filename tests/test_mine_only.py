@@ -222,10 +222,13 @@ async def test_mine_only_empty_state_message_names_the_user():
         tabbed.active = "jobs"
         await pilot.pause()
 
-        # Snapshot with NO 'hli' jobs.
+        # Snapshot with NO 'hli' jobs. Mark first_tick_done=True so we
+        # test the empty-state path, not Bundle-1 Sub-fix-4's
+        # "loading…" placeholder.
         snap = Snapshot()
         snap.jobs = [_job("2001", "alice"), _job("2002", "bob")]
         snap.cluster_user = "hli"
+        snap.first_tick_done = True
         app.mine_only = True
         app.snapshot = snap
         await pilot.pause(0.4)
@@ -257,10 +260,14 @@ async def test_empty_placeholder_text_differs_by_mode():
         await pilot.pause()
 
         # Empty in both modes — no jobs and no recent_jobs.
+        # first_tick_done=True keeps us out of the "loading…" branch
+        # (Bundle-1 Sub-fix-4) so we exercise the mode-parametrized
+        # empty-state text.
         snap = Snapshot()
         snap.jobs = []
         snap.recent_jobs = []
         snap.cluster_user = ""    # bypass mine_only branch
+        snap.first_tick_done = True
         app.mine_only = False
         app.snapshot = snap
         await pilot.pause(0.3)
@@ -284,6 +291,55 @@ async def test_empty_placeholder_text_differs_by_mode():
         assert active_msg != recent_msg, (
             f"placeholder must differ between modes; "
             f"active={active_msg!r} recent={recent_msg!r}"
+        )
+
+
+async def test_loading_placeholder_transitions_to_empty_state():
+    """Bundle-1 Sub-fix-4: before any successful tick, the JobsTable's
+    placeholder reads "loading…". After a successful tick lands an
+    empty snapshot (first_tick_done=True, no jobs), it transitions to
+    the empty-state text "no active jobs".
+
+    Pre-fix the cold-start window was indistinguishable from
+    "fetched, no rows" on LRZ where the ProxyJump cold-connect blocks
+    the first tick for ~10 s — confusing users into thinking the
+    cluster was idle when really we hadn't even talked to it yet."""
+    app = RohanBoardApp(config=_minimal_overview_config())
+    async with app.run_test() as pilot:
+        tabbed = app.query_one(TabbedContent)
+        tabbed.active = "jobs"
+        await pilot.pause()
+
+        # Cold-start snapshot: empty + first_tick_done=False.
+        snap_loading = Snapshot()
+        snap_loading.jobs = []
+        snap_loading.cluster_user = ""
+        snap_loading.first_tick_done = False
+        app.mine_only = False
+        app.snapshot = snap_loading
+        await pilot.pause(0.3)
+
+        jt = app.query_one(JobsTable)
+        placeholder = jt.query_one("#empty_placeholder", Static)
+        loading_msg = str(placeholder.render())
+        assert "loading" in loading_msg.lower(), (
+            f"cold-start placeholder should say 'loading…', got {loading_msg!r}"
+        )
+
+        # First successful tick lands an empty snapshot.
+        snap_empty = Snapshot()
+        snap_empty.jobs = []
+        snap_empty.cluster_user = ""
+        snap_empty.first_tick_done = True
+        app.snapshot = snap_empty
+        await pilot.pause(0.3)
+
+        empty_msg = str(placeholder.render())
+        assert "loading" not in empty_msg.lower(), (
+            f"post-tick placeholder should NOT say 'loading', got {empty_msg!r}"
+        )
+        assert "no active" in empty_msg, (
+            f"post-tick placeholder should say 'no active jobs', got {empty_msg!r}"
         )
 
 

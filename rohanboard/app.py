@@ -83,6 +83,12 @@ class RohanBoardApp(App):
         super().__init__()
         self.cfg = config or load_config()
         self._history: deque[UtilizationSample] = deque(maxlen=HISTORY_CAP)
+        # Bundle-1 Sub-fix-4: sticky "first successful tick has completed"
+        # flag. Stamped onto each snapshot as `first_tick_done` so widgets
+        # can show "loading…" before any success and "no active/recent
+        # jobs" after. Once True, stays True — transient failures don't
+        # regress the user to a "loading…" view.
+        self._first_tick_done: bool = False
         # Phase 4d.2-E: --debug CLI flag opens a per-tick text log file
         # the user can `tail -f` outside the TUI. Path comes from the
         # ROHANBOARD_DEBUG_LOG env var (set by __main__.py when --debug
@@ -523,6 +529,14 @@ class RohanBoardApp(App):
         # snapshot so JobsTable / CompactJobs can filter `mine_only`
         # client-side without poking the executor at render time.
         snap.cluster_user = cluster_user
+        # Bundle-1 Sub-fix-4: flip the sticky flag on the success path
+        # (raw is not None == combined fetch succeeded; individual
+        # parses may still have failed but those land in snap.errors
+        # and the widget's err-rendering branch shows them instead of
+        # the "loading…" placeholder).
+        if raw is not None:
+            self._first_tick_done = True
+        snap.first_tick_done = self._first_tick_done
         # Reactive write — synchronously triggers watch_snapshot fan-out.
         with perf_block("refresh", "reactive_set"):
             self.snapshot = snap

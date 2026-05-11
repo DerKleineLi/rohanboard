@@ -623,7 +623,10 @@ class JobsTable(Widget):
                 table.add_row(Text(f"⚠ {err}", style="bold red"), *([""] * (n_cols - 1)))
             else:
                 self._render_empty_placeholder(
-                    self._empty_state_message(mine_only, snapshot.cluster_user)
+                    self._empty_state_message(
+                        mine_only, snapshot.cluster_user,
+                        first_tick_done=getattr(snapshot, "first_tick_done", True),
+                    )
                 )
             return
 
@@ -718,7 +721,10 @@ class JobsTable(Widget):
 
         if not jobs:
             self._render_empty_placeholder(
-                self._empty_state_message(mine_only, snapshot.cluster_user)
+                self._empty_state_message(
+                    mine_only, snapshot.cluster_user,
+                    first_tick_done=getattr(snapshot, "first_tick_done", True),
+                )
             )
         else:
             self._clear_empty_placeholder()
@@ -784,13 +790,25 @@ class JobsTable(Widget):
 
     # ── data ────────────────────────────────────────────────
 
-    def _empty_state_message(self, mine_only: bool, cluster_user: str) -> str:
+    def _empty_state_message(
+        self,
+        mine_only: bool,
+        cluster_user: str,
+        first_tick_done: bool = True,
+    ) -> str:
         """Parametrized empty/no-match placeholder text by mode + filter.
 
         active mode → "no active jobs"; recent mode → "no recent jobs".
         Filter-mismatch and mine_only branches keep the existing
         breadcrumbs so the user can tell WHY the table is empty.
+
+        Bundle-1 Sub-fix-4: when `first_tick_done` is False AND the
+        filter is empty (so we're not in a no-match state), return
+        "loading…" — the cluster hasn't yielded any data yet and
+        "no active jobs" would falsely imply we know the answer.
         """
+        if not first_tick_done and not self.filter_text:
+            return "loading…"
         kind = "active" if self.mode == "active" else "recent"
         if self.filter_text:
             suffix = " (mine only)" if mine_only and cluster_user else ""
@@ -883,7 +901,10 @@ class JobsTable(Widget):
                 table.add_row(Text(f"⚠ {err}", style="bold red"), *([""] * (n_cols - 1)))
             else:
                 self._render_empty_placeholder(
-                    self._empty_state_message(mine_only, snapshot.cluster_user)
+                    self._empty_state_message(
+                        mine_only, snapshot.cluster_user,
+                        first_tick_done=getattr(snapshot, "first_tick_done", True),
+                    )
                 )
             return
 
@@ -973,7 +994,10 @@ class JobsTable(Widget):
 
         if not jobs:
             self._render_empty_placeholder(
-                self._empty_state_message(mine_only, snapshot.cluster_user)
+                self._empty_state_message(
+                    mine_only, snapshot.cluster_user,
+                    first_tick_done=getattr(snapshot, "first_tick_done", True),
+                )
             )
         else:
             self._clear_empty_placeholder()

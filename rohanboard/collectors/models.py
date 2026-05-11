@@ -134,3 +134,10 @@ class Snapshot:
     # if whoami hasn't resolved yet (cold start); widgets treat that
     # as "show everything" since we can't tell which row is yours.
     cluster_user: str = ""
+    # Bundle-1 Sub-fix-4: True once a tick's parsers populated jobs +
+    # recent_jobs successfully. Distinguishes "still fetching" (False
+    # → render "loading…" placeholder) from "fetched, no rows" (True →
+    # render "no active/recent jobs"). Set ONLY on the success path of
+    # `_refresh_all`; failed fetches leave it False so a transient
+    # error doesn't pretend to be a known-empty cluster.
+    first_tick_done: bool = False

@@ -132,7 +132,16 @@ class CompactJobs(Widget):
             title += f"  [dim]({len(jobs)})[/dim]"
         self.query_one("#title", Static).update(title)
         if not jobs:
-            body.update("[dim italic]no active jobs[/dim italic]")
+            # Bundle-1 Sub-fix-4: discriminate "still fetching" from
+            # "fetched, no rows". `first_tick_done` is False until the
+            # first successful refresh tick lands on `_refresh_all`; on
+            # cold start (especially LRZ ProxyJump ~10 s) the user
+            # should see "loading…" rather than a confident "no active
+            # jobs" that turns into rows seconds later.
+            if not getattr(snap, "first_tick_done", True):
+                body.update("[dim italic]loading…[/dim italic]")
+            else:
+                body.update("[dim italic]no active jobs[/dim italic]")
             return
         rows = [_compact_row(j) for j in jobs]
         body.update(Text("\n").join(rows))
