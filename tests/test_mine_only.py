@@ -161,6 +161,66 @@ def test_compact_jobs_filters_to_cluster_user_unit():
     asyncio.run(go())
 
 
+async def test_overview_pane_height_tracks_displayed_compact_jobs_rows():
+    """Bundle-2 B2.5 (sister-path to B2.3): the OverviewPanel's
+    `_job_count` — which drives `_jobs_natural()` and the CompactJobs
+    card's height — must mirror CompactJobs's content filter
+    (cluster_user-only) regardless of `app.mine_only`.
+
+    Pre-fix: with `mine_only=False` on Overview, CompactJobs body
+    correctly rendered 3 rows (cluster_user's jobs) but `_job_count`
+    fell into the else branch and was set to `len(snap.jobs)` (5),
+    so the right-column natural height reserved space for ~5 rows
+    → blank strip below the visible 3 rows. Post-fix `_job_count`
+    is 3 in both toggle positions."""
+    from rohanboard.widgets.overview import OverviewPanel
+
+    cfg = Config()
+    cfg.exec_spec = "local"
+    cfg.layout = LayoutConfig(tabs=[
+        TabConfig(id="overview", title="Overview", widgets=["overview_panel"]),
+    ])
+    cfg.storage_entries = []
+    cfg.presets = {"jobs": [], "nodes": []}
+
+    app = RohanBoardApp(config=cfg)
+    async with app.run_test() as pilot:
+        tabbed = app.query_one(TabbedContent)
+        tabbed.active = "overview"
+        await pilot.pause()
+
+        snap = _mixed_snapshot()    # 5 jobs, 3 by 'hli'
+
+        # mine_only=False — the regression case.
+        app.mine_only = False
+        app.snapshot = snap
+        await pilot.pause(0.4)
+
+        overview = app.query_one(OverviewPanel)
+        count_false = overview._job_count
+        assert count_false == 3, (
+            f"mine_only=False: _job_count must equal the cluster_user-only "
+            f"count (3) so OverviewPanel's height tracks displayed rows; "
+            f"got {count_false}"
+        )
+
+        # mine_only=True — unchanged (was already correct).
+        app.mine_only = True
+        await pilot.pause(0.4)
+
+        count_true = overview._job_count
+        assert count_true == 3, (
+            f"mine_only=True: _job_count should also be 3 (cluster_user only); "
+            f"got {count_true}"
+        )
+
+        # The whole point: invariance across the toggle.
+        assert count_false == count_true, (
+            f"Overview pane height must be invariant to app.mine_only; "
+            f"got {count_false} (False) vs {count_true} (True)"
+        )
+
+
 def test_compact_jobs_ignores_app_mine_only_toggle():
     """Bundle-2 B2.3: Overview is "your stuff at a glance." The
     CompactJobs card's row count is invariant to `app.mine_only`."""

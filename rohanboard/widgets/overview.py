@@ -479,19 +479,25 @@ class OverviewPanel(Widget):
         self._relayout()
 
     def update_snapshot(self, snap: Snapshot) -> None:
-        # Phase 4d.2-D: snapshot.jobs is all-users now. The layout
-        # decision (`_jobs_natural`) needs the count of what CompactJobs
-        # will ACTUALLY render — i.e. the mine-filtered count when the
-        # user has mine_only on. Mirror CompactJobs.update_snapshot's
-        # filter so the right-column natural height matches the body.
-        try:
-            mine_only = bool(getattr(self.app, "mine_only", True))
-        except Exception:
-            mine_only = True
-        if mine_only and snap.cluster_user:
-            self._job_count = sum(1 for j in snap.jobs if j.user == snap.cluster_user)
+        # Bundle-2 B2.5 (sister-path to B2.3): CompactJobs's BODY is
+        # locked to `cluster_user`-only jobs on Overview regardless of
+        # `app.mine_only` (see CompactJobs.update_snapshot). The HEIGHT
+        # path here must mirror that filter — pre-fix it still read
+        # `app.mine_only` and on `mine_only=False` set `_job_count =
+        # len(snap.jobs)` (all-users), so `_jobs_natural()` reserved
+        # space for ~50 rows while only ~3 actually rendered → large
+        # blank below the visible rows.
+        #
+        # Cold-start (cluster_user == "") → `_job_count = 0` → the
+        # natural height is `4 + max(0, 1) = 5` lines, matching the
+        # single-line "loading…" body CompactJobs draws while whoami
+        # is still resolving.
+        if snap.cluster_user:
+            self._job_count = sum(
+                1 for j in snap.jobs if j.user == snap.cluster_user
+            )
         else:
-            self._job_count = len(snap.jobs)
+            self._job_count = 0
         # re-layout may be needed if util fit-check flipped
         self._relayout()
         self._push_snapshot()
