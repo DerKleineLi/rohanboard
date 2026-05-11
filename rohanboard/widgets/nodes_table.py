@@ -612,8 +612,21 @@ class NodesTable(Widget):
             reverse=self._sort_reverse,
         )
 
+        # Bundle-4 (newjobs bug sister-path, 2026-05-11): see the same
+        # block in `update_snapshot` for the rationale — `table.add_row`
+        # appends at the bottom of the DataTable, so a freshly-mounted
+        # node would land below all existing rows even when sort placed
+        # it elsewhere. Cluster nodes change rarely (mostly only on
+        # drain/down transitions), so this is dormant in practice, but
+        # mirror the JobsTable shape so the two tables share one rule.
+        incoming_ids = {n.name for n in nodes}
+        new_ids = incoming_ids - self._row_keys.keys()
         current_sort = (self._sort_col, self._sort_metric, self._sort_reverse)
-        if self._applied_sort != current_sort or (not self._row_keys and table.row_count > 0):
+        if (
+            self._applied_sort != current_sort
+            or (not self._row_keys and table.row_count > 0)
+            or new_ids
+        ):
             table.clear()
             self._row_keys.clear()
             self._applied_sort = current_sort
@@ -754,8 +767,17 @@ class NodesTable(Widget):
             reverse=self._sort_reverse,
         )
 
+        # Bundle-4 (newjobs bug sister-path, 2026-05-11): see the same
+        # block in `_apply_filter_async` above — detect new node names
+        # and force a clear+rebuild so add_row appends in sort order.
+        incoming_ids = {n.name for n in nodes}
+        new_ids = incoming_ids - self._row_keys.keys()
         current_sort = (self._sort_col, self._sort_metric, self._sort_reverse)
-        if self._applied_sort != current_sort or (not self._row_keys and table.row_count > 0):
+        if (
+            self._applied_sort != current_sort
+            or (not self._row_keys and table.row_count > 0)
+            or new_ids
+        ):
             table.clear()
             self._row_keys.clear()
             self._applied_sort = current_sort

@@ -648,8 +648,24 @@ class JobsTable(Widget):
             jobs = [j for j in jobs if j.user == snapshot.cluster_user]
         jobs.sort(key=lambda j: _sort_value(j, self._sort_col), reverse=self._sort_reverse)
 
+        # Bundle-4 (newjobs bug, 2026-05-11): `table.add_row` appends at
+        # the BOTTOM of the DataTable regardless of iteration order, so a
+        # new job ID landing in the in-place-diff branch ended up at the
+        # bottom even though `jobs.sort()` placed it at index 0 in the
+        # iteration. User-facing symptom: a freshly-submitted sleep job
+        # never showed up at the top under sort=Job↓; the user had to
+        # toggle mine_only (which clears `_row_keys` and forces a full
+        # rebuild) to see it. Detect any incoming ID NOT already in
+        # `_row_keys` and force the clear+rebuild branch — so the next
+        # loop iteration rebuilds the table top-down in sort order.
+        incoming_ids = {j.job_id for j in jobs}
+        new_ids = incoming_ids - self._row_keys.keys()
         current_sort = (self._sort_col, self._sort_reverse)
-        if self._applied_sort != current_sort or (not self._row_keys and table.row_count > 0):
+        if (
+            self._applied_sort != current_sort
+            or (not self._row_keys and table.row_count > 0)
+            or new_ids
+        ):
             table.clear()
             self._row_keys.clear()
             self._applied_sort = current_sort
@@ -963,8 +979,21 @@ class JobsTable(Widget):
             jobs = [j for j in jobs if j.user == snapshot.cluster_user]
         jobs.sort(key=lambda j: _sort_value(j, self._sort_col), reverse=self._sort_reverse)
 
+        # Bundle-4 (newjobs bug, 2026-05-11): see `_apply_filter_async`
+        # for the rationale — `table.add_row` appends at the bottom of
+        # the DataTable, so new job IDs landing in the in-place-diff
+        # branch ended up at the bottom of the visible table instead of
+        # in their sort-order position. Detect new IDs and force a
+        # full rebuild so the loop below re-adds rows top-down in sort
+        # order.
+        incoming_ids = {j.job_id for j in jobs}
+        new_ids = incoming_ids - self._row_keys.keys()
         current_sort = (self._sort_col, self._sort_reverse)
-        if self._applied_sort != current_sort or (not self._row_keys and table.row_count > 0):
+        if (
+            self._applied_sort != current_sort
+            or (not self._row_keys and table.row_count > 0)
+            or new_ids
+        ):
             table.clear()
             self._row_keys.clear()
             self._applied_sort = current_sort
