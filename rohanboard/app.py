@@ -563,7 +563,13 @@ class RohanBoardApp(App):
                         jt.mine_only = new
             except Exception:
                 pass
-            coro = self._broadcast_snapshot(getattr(self, "snapshot", Snapshot()))
+            # Phase 4d.2-E step G: click-driven broadcasts skip
+            # `batch_update()` so the user sees the table fill
+            # progressively instead of waiting for the whole fanout
+            # to commit at once (~5-20 ms first-paint vs ~150 ms full).
+            coro = self._broadcast_snapshot(
+                getattr(self, "snapshot", Snapshot()), batch=False,
+            )
             if not getattr(self, "is_running", False):
                 coro.close()
                 return
@@ -582,7 +588,13 @@ class RohanBoardApp(App):
         we don't need to mirror back to each JobsTable here.
         """
         with perf_block("click", "mode_app_watcher", extra=f"new={new}"):
-            coro = self._broadcast_snapshot(getattr(self, "snapshot", Snapshot()))
+            # Phase 4d.2-E step G: click-driven broadcasts skip
+            # `batch_update()` so the user sees the table fill
+            # progressively instead of waiting for the whole fanout
+            # to commit at once (~5-20 ms first-paint vs ~150 ms full).
+            coro = self._broadcast_snapshot(
+                getattr(self, "snapshot", Snapshot()), batch=False,
+            )
             if not getattr(self, "is_running", False):
                 coro.close()
                 return
@@ -599,7 +611,13 @@ class RohanBoardApp(App):
         watcher. The broadcast's per-widget update_snapshot reads the
         JobsTable's already-flipped local state."""
         with perf_block("click", "sort_app_watcher", extra=f"new={new}"):
-            coro = self._broadcast_snapshot(getattr(self, "snapshot", Snapshot()))
+            # Phase 4d.2-E step G: click-driven broadcasts skip
+            # `batch_update()` so the user sees the table fill
+            # progressively instead of waiting for the whole fanout
+            # to commit at once (~5-20 ms first-paint vs ~150 ms full).
+            coro = self._broadcast_snapshot(
+                getattr(self, "snapshot", Snapshot()), batch=False,
+            )
             if not getattr(self, "is_running", False):
                 coro.close()
                 return
@@ -608,13 +626,21 @@ class RohanBoardApp(App):
             except Exception:
                 coro.close()
 
-    async def _broadcast_snapshot(self, new: Snapshot) -> None:
+    async def _broadcast_snapshot(self, new: Snapshot, *, batch: bool = True) -> None:
         """Push `new` into every widget that implements update_snapshot,
         yielding to the loop between each so the 20 FPS animation timer
         can fire in between.
 
         `batch_update()` coalesces the resulting screen refreshes into a
-        single paint once the fan-out completes.
+        single paint once the fan-out completes. For tick-driven
+        broadcasts (the 5/15 s refresh) we want this — it avoids
+        per-widget flicker when ~10 widgets update at once with fresh
+        data. For CLICK-driven broadcasts (mine_only / mode / sort
+        flip — Phase H, plus future click watchers) we want progressive
+        paint — the first 50 rows of the DataTable land in <2 ms code
+        time but were invisible until fanout end (~150 ms post-click).
+        Caller passes `batch=False` to opt into progressive paint.
+        Default stays True so existing tick callers don't change shape.
 
         Widgets may declare `update_snapshot` as either sync or async.
         Async handlers chunk their internal rebuild via
@@ -633,11 +659,18 @@ class RohanBoardApp(App):
             f"snap.cluster_user={new.cluster_user!r} "
             f"jobs={len(new.jobs)} sample_user={sample_user!r} "
             f"recent_jobs={len(new.recent_jobs)} "
-            f"sample_recent_user={sample_recent!r}"
+            f"sample_recent_user={sample_recent!r} "
+            f"batch={batch}"
         )
         import inspect
         import time as _t
-        with perf_block("fanout", "all"), self.batch_update():
+        from contextlib import nullcontext
+        # Phase 4d.2-E step G: batch=False skips `batch_update()`, so
+        # each widget's repaint emits as soon as its update_snapshot
+        # finishes — first DataTable rows land on-screen within
+        # ~5-20 ms instead of waiting for the whole fanout to complete.
+        batch_cm = self.batch_update() if batch else nullcontext()
+        with perf_block("fanout", "all", extra=f"batch={batch}"), batch_cm:
             for widget in list(self.query("*")):
                 handler = getattr(widget, "update_snapshot", None)
                 if not callable(handler):
