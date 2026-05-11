@@ -63,18 +63,30 @@ cp config.example.toml ~/.config/rohanboard/config.toml
 Filter presets live in `~/.config/rohanboard/filters.json` — a flat list
 of `{"name": "...", "expr": "..."}` objects.
 
-## Deployment idea: run it on the login node
+**Multiple clusters:** pass `--config <path>` to point at a per-cluster
+TOML (e.g. `configs/rohan.toml`, `configs/lrz.toml`). The executor
+specified in each config (`exec = "ssh:<host>"` or `exec = "local"`)
+handles the cluster ssh internally, so you can run several instances
+side-by-side — each watching a different cluster — from one machine.
 
-rohanboard is happy running inside `tmux` over `ssh`. A one-pane window
-that always shows the dashboard makes for a nice always-on monitor:
+## Deployment idea: local tmux, one window per cluster
+
+rohanboard runs locally; the executor handles the cluster ssh. A
+dedicated `tmux` session with one window per cluster makes a clean
+always-on monitor:
 
 ```bash
-tmux new-window -n monitor \
-    'ssh login.cluster -t "~/rohanboard/.venv/bin/rohanboard"'
+tmux new-session -d -s rohanboard -n rohan \
+    'cd /path/to/rohanboard && uv run rohanboard --config configs/rohan.toml'
+tmux new-window  -d -t rohanboard -n lrz \
+    'cd /path/to/rohanboard && uv run rohanboard --config configs/lrz.toml'
+tmux -u attach -t rohanboard
 ```
 
-(Use the venv binary directly — non-interactive `ssh` does not pick up
-`uv` from conda's PATH.)
+Older versions of this README recommended running rohanboard *on* the
+login node via `ssh login.cluster -t '...'`. That pattern is
+superseded by the executor abstraction — the dashboard now lives
+locally and ssh-es out to whichever cluster(s) the config points at.
 
 ## Development
 
