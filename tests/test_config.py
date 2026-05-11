@@ -295,17 +295,43 @@ def test_lrz_config_loads():
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Bundle-1 Sub-fix-2: sacct_max_rows config knob.
+# Bundle-2 B2.1: [refresh.sacct] nested config — two-snapshot sacct
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_sacct_max_rows_defaults_to_none(tmp_path):
-    """Empty config → sacct_max_rows is None (= no cap, keep all)."""
+def test_sacct_config_defaults(tmp_path):
+    """Empty config → sacct defaults: starttime self/all from the
+    user's example, both max_rows None (no cap)."""
     cfg = load(_write(tmp_path, ""))
-    assert cfg.refresh.sacct_max_rows is None
+    assert cfg.refresh.sacct.starttime_self == "now-7days"
+    assert cfg.refresh.sacct.starttime_all == "now-1day"
+    assert cfg.refresh.sacct.max_rows_self is None
+    assert cfg.refresh.sacct.max_rows_all is None
 
 
-def test_sacct_max_rows_parses_positive_int(tmp_path):
-    """`sacct_max_rows = 25` lands as int 25 on cfg.refresh."""
-    cfg = load(_write(tmp_path, "[refresh]\nsacct_max_rows = 25\n"))
-    assert cfg.refresh.sacct_max_rows == 25
+def test_sacct_config_parses_nested_dotted_keys(tmp_path):
+    """`[refresh.sacct]` with dotted `starttime.self` etc. parses into
+    SacctRefreshConfig.starttime_self / .max_rows_self / etc."""
+    body = (
+        "[refresh.sacct]\n"
+        'starttime.self = "now-30days"\n'
+        'starttime.all  = "now-6hours"\n'
+        "max_rows.self = 100\n"
+        "max_rows.all  = 50\n"
+    )
+    cfg = load(_write(tmp_path, body))
+    assert cfg.refresh.sacct.starttime_self == "now-30days"
+    assert cfg.refresh.sacct.starttime_all == "now-6hours"
+    assert cfg.refresh.sacct.max_rows_self == 100
+    assert cfg.refresh.sacct.max_rows_all == 50
+
+
+def test_sacct_config_partial_keys_inherit_defaults(tmp_path):
+    """Setting only `max_rows.all` keeps the other three at defaults —
+    so a cluster can override one knob without restating all four."""
+    body = "[refresh.sacct]\nmax_rows.all = 30\n"
+    cfg = load(_write(tmp_path, body))
+    assert cfg.refresh.sacct.max_rows_all == 30
+    assert cfg.refresh.sacct.max_rows_self is None
+    assert cfg.refresh.sacct.starttime_self == "now-7days"
+    assert cfg.refresh.sacct.starttime_all == "now-1day"

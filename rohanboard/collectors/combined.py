@@ -39,7 +39,13 @@ class CombinedRaw:
     quota: str = ""
     df: str = ""
     squeue: str = ""
-    sacct: str = ""
+    # Bundle-2 B2.1: TWO sacct queries per tick — see fetch_combined
+    # docstring. `sacct_self` is `-u $USER --starttime=<starttime_self>`
+    # (long-history, few rows); `sacct_all` is `--starttime=<starttime_all>`
+    # (short window, all users). Both run in parallel inside the same
+    # bash invocation — still ONE ssh round-trip per tick.
+    sacct_self: str = ""
+    sacct_all: str = ""
     nodes: str = ""
     dssusrinfo: str = ""
     # Bundle-1 Sub-fix-3: REMOTE whoami piggybacks on the combined tick
@@ -115,7 +121,8 @@ def parse_combined(text: str) -> CombinedRaw:
         quota="\n".join(sections.get("quota", [])),
         df="\n".join(sections.get("df", [])),
         squeue="\n".join(sections.get("squeue", [])),
-        sacct="\n".join(sections.get("sacct", [])),
+        sacct_self="\n".join(sections.get("sacct_self", [])),
+        sacct_all="\n".join(sections.get("sacct_all", [])),
         nodes="\n".join(sections.get("nodes", [])),
         dssusrinfo="\n".join(sections.get("dssusrinfo", [])),
         whoami="\n".join(sections.get("whoami", [])),
@@ -131,8 +138,9 @@ async def fetch_combined(
     squeue_format: str,
     squeue_users: list[str] | None,
     sacct_format: str,
-    sacct_starttime: str,
-    sacct_users: list[str] | None,
+    sacct_starttime_self: str,
+    sacct_starttime_all: str,
+    sacct_user: str | None,
     dssusrinfo_subcommands: list[str] | None = None,
     timeout: float = 25.0,
 ) -> CombinedRaw:
@@ -167,16 +175,27 @@ async def fetch_combined(
         squeue_argv += ["-u", ",".join(squeue_users)]
     sections["squeue"] = " ".join(shlex.quote(a) for a in squeue_argv)
 
-    sacct_argv = [
+    # Bundle-2 B2.1: two sacct queries per tick, both inside the same
+    # bash pipeline so they run in parallel (server-side) and still cost
+    # one ssh round-trip. `sacct_self` requires a resolved user; on cold
+    # start (sacct_user=None until whoami lands) the self section is
+    # skipped — next tick picks it up. `sacct_all` has no -u filter and
+    # always runs.
+    if sacct_user:
+        sacct_self_argv = [
+            "sacct", "-X", "-P", "-n",
+            f"--starttime={sacct_starttime_self}",
+            "-u", sacct_user,
+            "-o", sacct_format,
+        ]
+        sections["sacct_self"] = " ".join(shlex.quote(a) for a in sacct_self_argv)
+    sacct_all_argv = [
         "sacct", "-X", "-P", "-n",
-        f"--starttime={sacct_starttime}",
+        f"--starttime={sacct_starttime_all}",
+        "-a",
         "-o", sacct_format,
     ]
-    if sacct_users:
-        sacct_argv += ["-u", ",".join(sacct_users)]
-    else:
-        sacct_argv += ["-a"]
-    sections["sacct"] = " ".join(shlex.quote(a) for a in sacct_argv)
+    sections["sacct_all"] = " ".join(shlex.quote(a) for a in sacct_all_argv)
 
     # dssusrinfo: a list of subcommands (e.g. ["dsshome", "container_usage"]).
     # We concatenate them inside the section so a single dssusrinfo block

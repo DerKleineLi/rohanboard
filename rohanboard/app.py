@@ -369,6 +369,7 @@ class RohanBoardApp(App):
         # ── one ssh channel per tick — see collectors/combined.py ──
         try:
             with perf_block("collect", "combined"):
+                sacct_cfg = self.cfg.refresh.sacct
                 raw = await fetch_combined(
                     self.executor,
                     quota_user=quota_user,
@@ -377,8 +378,9 @@ class RohanBoardApp(App):
                     squeue_format=slurm.SQUEUE_O_FORMAT,
                     squeue_users=None,
                     sacct_format=slurm.SACCT_FORMAT,
-                    sacct_starttime="now-3days",
-                    sacct_users=None,
+                    sacct_starttime_self=sacct_cfg.starttime_self,
+                    sacct_starttime_all=sacct_cfg.starttime_all,
+                    sacct_user=cluster_user or None,
                     dssusrinfo_subcommands=dssusrinfo_subcommands,
                 )
         except Exception as e:
@@ -417,26 +419,36 @@ class RohanBoardApp(App):
                     )
                 except Exception as e:
                     snap.errors["jobs"] = str(e)
-                # sacct → recent_jobs
+                # Bundle-2 B2.1: two sacct parses, one per snapshot.
+                sacct_cfg = self.cfg.refresh.sacct
                 try:
-                    recent = slurm.parse_sacct(raw.sacct)
-                    snap.recent_jobs = slurm.cap_sacct(
-                        list(reversed(recent)),
-                        self.cfg.refresh.sacct_max_rows,
+                    recent_self = slurm.parse_sacct(raw.sacct_self)
+                    snap.recent_jobs_self = slurm.cap_sacct(
+                        list(reversed(recent_self)),
+                        sacct_cfg.max_rows_self,
                     )
-                    sacct_lines = raw.sacct.count("\n")
-                    if not raw.sacct.endswith("\n") and raw.sacct:
-                        sacct_lines += 1
-                    cap = self.cfg.refresh.sacct_max_rows
-                    cap_note = "no cap" if cap is None else f"cap={cap}"
                     self._debug_log(
-                        f"sacct: {sacct_lines} lines, "
-                        f"parsed {len(recent)} jobs (kept "
-                        f"{len(snap.recent_jobs)}; {cap_note}; "
-                        f"drop={sacct_lines - len(recent)})"
+                        f"sacct_self: parsed {len(recent_self)} jobs "
+                        f"(kept {len(snap.recent_jobs_self)}; "
+                        f"cap={sacct_cfg.max_rows_self}; "
+                        f"starttime={sacct_cfg.starttime_self})"
                     )
                 except Exception as e:
-                    snap.errors["recent_jobs"] = str(e)
+                    snap.errors["recent_jobs_self"] = str(e)
+                try:
+                    recent_all = slurm.parse_sacct(raw.sacct_all)
+                    snap.recent_jobs_all = slurm.cap_sacct(
+                        list(reversed(recent_all)),
+                        sacct_cfg.max_rows_all,
+                    )
+                    self._debug_log(
+                        f"sacct_all: parsed {len(recent_all)} jobs "
+                        f"(kept {len(snap.recent_jobs_all)}; "
+                        f"cap={sacct_cfg.max_rows_all}; "
+                        f"starttime={sacct_cfg.starttime_all})"
+                    )
+                except Exception as e:
+                    snap.errors["recent_jobs_all"] = str(e)
                 # scontrol show node → nodes (with partition filters)
                 try:
                     nodes = slurm.parse_scontrol_show_node(raw.nodes)
@@ -687,12 +699,15 @@ class RohanBoardApp(App):
         # comparing apples to apples). Tail ~/.cache/rohanboard/debug.log
         # to watch this in real time when running with --debug.
         sample_user = new.jobs[0].user if new.jobs else None
-        sample_recent = new.recent_jobs[0].user if new.recent_jobs else None
+        sample_self = new.recent_jobs_self[0].user if new.recent_jobs_self else None
+        sample_all = new.recent_jobs_all[0].user if new.recent_jobs_all else None
         self._debug_log(
             f"snap.cluster_user={new.cluster_user!r} "
             f"jobs={len(new.jobs)} sample_user={sample_user!r} "
-            f"recent_jobs={len(new.recent_jobs)} "
-            f"sample_recent_user={sample_recent!r} "
+            f"recent_jobs_self={len(new.recent_jobs_self)} "
+            f"sample_self_user={sample_self!r} "
+            f"recent_jobs_all={len(new.recent_jobs_all)} "
+            f"sample_all_user={sample_all!r} "
             f"batch={batch}"
         )
         import inspect

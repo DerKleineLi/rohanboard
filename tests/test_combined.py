@@ -32,7 +32,9 @@ def test_parse_combined_roundtrip_well_formed():
         f"{SECTION_END}\n"
         f"{SECTION_DELIM}squeue\n"
         f"{SECTION_END}\n"
-        f"{SECTION_DELIM}sacct\n"
+        f"{SECTION_DELIM}sacct_self\n"
+        f"{SECTION_END}\n"
+        f"{SECTION_DELIM}sacct_all\n"
         f"{SECTION_END}\n"
         f"{SECTION_DELIM}nodes\n"
         "NodeName=foo CPUTot=8\n"
@@ -44,7 +46,8 @@ def test_parse_combined_roundtrip_well_formed():
     assert "Disk quotas for user hli" in raw.quota
     assert "/cluster/host" in raw.df
     assert raw.squeue == ""
-    assert raw.sacct == ""
+    assert raw.sacct_self == ""
+    assert raw.sacct_all == ""
     assert "NodeName=foo" in raw.nodes
 
 
@@ -133,7 +136,8 @@ async def test_fetch_combined_makes_exactly_one_channel_per_tick():
         f"{SECTION_DELIM}quota\n{SECTION_END}\n"
         f"{SECTION_DELIM}df\n{SECTION_END}\n"
         f"{SECTION_DELIM}squeue\n{SECTION_END}\n"
-        f"{SECTION_DELIM}sacct\n{SECTION_END}\n",
+        f"{SECTION_DELIM}sacct_self\n{SECTION_END}\n"
+        f"{SECTION_DELIM}sacct_all\n{SECTION_END}\n",
         "",
     ))
     raw = await fetch_combined(
@@ -144,8 +148,9 @@ async def test_fetch_combined_makes_exactly_one_channel_per_tick():
         squeue_format="JobID:|,State:|",
         squeue_users=["hli"],
         sacct_format="JobID,State",
-        sacct_starttime="now-3days",
-        sacct_users=["hli"],
+        sacct_starttime_self="now-7days",
+        sacct_starttime_all="now-1day",
+        sacct_user="hli",
     )
     assert len(fake.calls) == 1, (
         f"expected exactly 1 ssh channel per tick, got {len(fake.calls)}: "
@@ -186,8 +191,9 @@ async def test_fetch_combined_dssusrinfo_section_uses_inner_subshell():
         squeue_format="x",
         squeue_users=None,
         sacct_format="y",
-        sacct_starttime="now",
-        sacct_users=None,
+        sacct_starttime_self="now",
+        sacct_starttime_all="now",
+        sacct_user=None,
         dssusrinfo_subcommands=["dsshome", "container_usage"],
     )
     script = fake.calls[0][0][2]
@@ -211,8 +217,9 @@ async def test_fetch_combined_dssusrinfo_section_skipped_when_empty():
         squeue_format="x",
         squeue_users=None,
         sacct_format="y",
-        sacct_starttime="now",
-        sacct_users=None,
+        sacct_starttime_self="now",
+        sacct_starttime_all="now",
+        sacct_user=None,
         dssusrinfo_subcommands=None,
     )
     script = fake.calls[0][0][2]
@@ -231,8 +238,9 @@ async def test_fetch_combined_quota_skipped_when_no_user():
         squeue_format="JobID:|",
         squeue_users=None,
         sacct_format="JobID",
-        sacct_starttime="now-3days",
-        sacct_users=None,
+        sacct_starttime_self="now-3days",
+        sacct_starttime_all="now-3days",
+        sacct_user=None,
     )
     script = fake.calls[0][0][2]
     assert "quota -u" not in script
@@ -250,7 +258,7 @@ async def test_fetch_combined_includes_whoami_section():
         "di35dob\n"
         f"{SECTION_END}\n"
         f"{SECTION_DELIM}squeue\n{SECTION_END}\n"
-        f"{SECTION_DELIM}sacct\n{SECTION_END}\n",
+        f"{SECTION_DELIM}sacct_all\n{SECTION_END}\n",
         "",
     ))
     raw = await fetch_combined(
@@ -261,8 +269,9 @@ async def test_fetch_combined_includes_whoami_section():
         squeue_format="x",
         squeue_users=None,
         sacct_format="y",
-        sacct_starttime="now",
-        sacct_users=None,
+        sacct_starttime_self="now",
+        sacct_starttime_all="now",
+        sacct_user=None,
     )
     script = fake.calls[0][0][2]
     # Whoami runs in the parallel block.
@@ -271,6 +280,82 @@ async def test_fetch_combined_includes_whoami_section():
     )
     # Parser extracts it.
     assert raw.whoami.strip() == "di35dob", f"got raw.whoami={raw.whoami!r}"
+
+
+async def test_two_snapshot_sacct_self_query_filters_to_user():
+    """Bundle-2 B2.1: when `sacct_user` is provided, the self section
+    runs `sacct -u <user>` with `starttime_self` — it's the
+    long-history per-user query."""
+    fake = _FakeExecutor(response=(0, "", ""))
+    await fetch_combined(
+        fake,
+        quota_user=None,
+        df_explicit_paths=[],
+        df_prefix_globs=[],
+        squeue_format="x",
+        squeue_users=None,
+        sacct_format="y",
+        sacct_starttime_self="now-7days",
+        sacct_starttime_all="now-1day",
+        sacct_user="hli",
+    )
+    script = fake.calls[0][0][2]
+    # Self query: -u hli + starttime self.
+    assert "sacct -X -P -n --starttime=now-7days -u hli" in script, (
+        f"self section missing -u filter / wrong starttime:\n{script}"
+    )
+
+
+async def test_two_snapshot_sacct_all_query_omits_user_filter():
+    """Bundle-2 B2.1: the all section runs `sacct -a --starttime=<all>`
+    with NO -u filter — it's the short-window cross-user query."""
+    fake = _FakeExecutor(response=(0, "", ""))
+    await fetch_combined(
+        fake,
+        quota_user=None,
+        df_explicit_paths=[],
+        df_prefix_globs=[],
+        squeue_format="x",
+        squeue_users=None,
+        sacct_format="y",
+        sacct_starttime_self="now-7days",
+        sacct_starttime_all="now-1day",
+        sacct_user="hli",
+    )
+    script = fake.calls[0][0][2]
+    # The all section uses -a and the all-starttime.
+    assert "sacct -X -P -n --starttime=now-1day -a" in script, (
+        f"all section missing -a / wrong starttime:\n{script}"
+    )
+
+
+async def test_two_snapshot_sacct_self_skipped_when_no_user():
+    """Bundle-2 B2.1: cold start (sacct_user=None until whoami lands)
+    → the self section is skipped (would be invalid as `sacct -u ''`).
+    The all section still runs."""
+    fake = _FakeExecutor(response=(0, "", ""))
+    await fetch_combined(
+        fake,
+        quota_user=None,
+        df_explicit_paths=[],
+        df_prefix_globs=[],
+        squeue_format="x",
+        squeue_users=None,
+        sacct_format="y",
+        sacct_starttime_self="now-7days",
+        sacct_starttime_all="now-1day",
+        sacct_user=None,
+    )
+    script = fake.calls[0][0][2]
+    # Self section is absent — no sacct -u line, no sacct_self section
+    # name in the dump loop.
+    assert "sacct -X -P -n --starttime=now-7days -u" not in script, (
+        f"self section should be skipped when sacct_user=None:\n{script}"
+    )
+    # All section still runs.
+    assert "sacct -X -P -n --starttime=now-1day -a" in script, (
+        f"all section should run on cold start:\n{script}"
+    )
 
 
 def test_fetch_combined_raises_on_wrapper_failure():
@@ -290,8 +375,9 @@ def test_fetch_combined_raises_on_wrapper_failure():
             squeue_format="x",
             squeue_users=None,
             sacct_format="y",
-            sacct_starttime="now",
-            sacct_users=None,
+            sacct_starttime_self="now",
+            sacct_starttime_all="now",
+            sacct_user=None,
         )
 
     try:

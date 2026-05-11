@@ -262,10 +262,13 @@ async def test_empty_placeholder_text_differs_by_mode():
         # Empty in both modes — no jobs and no recent_jobs.
         # first_tick_done=True keeps us out of the "loading…" branch
         # (Bundle-1 Sub-fix-4) so we exercise the mode-parametrized
-        # empty-state text.
+        # empty-state text. Bundle-2 B2.1: both recent snapshots empty
+        # so Recent mode renders the empty state regardless of
+        # mine_only.
         snap = Snapshot()
         snap.jobs = []
-        snap.recent_jobs = []
+        snap.recent_jobs_self = []
+        snap.recent_jobs_all = []
         snap.cluster_user = ""    # bypass mine_only branch
         snap.first_tick_done = True
         app.mine_only = False
@@ -340,6 +343,75 @@ async def test_loading_placeholder_transitions_to_empty_state():
         )
         assert "no active" in empty_msg, (
             f"post-tick placeholder should say 'no active jobs', got {empty_msg!r}"
+        )
+
+
+async def test_mine_only_flip_swaps_snapshot_in_recent_mode():
+    """Bundle-2 B2.1: in Recent mode, mine_only=True reads from
+    snap.recent_jobs_self (sacct -u $USER), mine_only=False reads
+    from snap.recent_jobs_all (sacct -a). Flipping the toggle SWAPS
+    which list renders — no refetch.
+
+    Both snapshots are pre-staged on a single ssh tick, so the
+    executor must NOT be called during the flip."""
+    app = RohanBoardApp(config=_minimal_overview_config())
+    async with app.run_test() as pilot:
+        tabbed = app.query_one(TabbedContent)
+        tabbed.active = "jobs"
+        await pilot.pause()
+
+        snap = Snapshot()
+        # Self list: 2 entries (the user's own). All list: 5 (different
+        # mix). Distinct enough that row counts identify which list
+        # the JobsTable is rendering.
+        snap.recent_jobs_self = [
+            _job("9001", "hli"),
+            _job("9002", "hli"),
+        ]
+        snap.recent_jobs_all = [
+            _job("9001", "hli"),
+            _job("9003", "alice"),
+            _job("9004", "alice"),
+            _job("9005", "bob"),
+            _job("9006", "bob"),
+        ]
+        snap.cluster_user = "hli"
+        snap.first_tick_done = True
+        app.mine_only = True
+        app.snapshot = snap
+        await pilot.pause(0.4)
+
+        jt = app.query_one(JobsTable)
+        jt.mode = "recent"
+        await pilot.pause(0.4)
+
+        table = jt.query_one("#jobs_table_dt", DataTable)
+        assert table.row_count == 2, (
+            f"mine_only=True + Recent should read recent_jobs_self (2 rows), "
+            f"got {table.row_count}"
+        )
+
+        # Wrap executor.run AFTER the initial render so we count only
+        # post-flip calls.
+        original_run = app.executor.run
+        post_flip_calls: list[tuple] = []
+
+        async def counting_run(argv, timeout=None):
+            post_flip_calls.append((tuple(argv), timeout))
+            return await original_run(argv, timeout=timeout)
+
+        app.executor.run = counting_run    # type: ignore[method-assign]
+
+        app.mine_only = False
+        await pilot.pause(0.4)
+
+        assert table.row_count == 5, (
+            f"mine_only=False + Recent should swap to recent_jobs_all (5 rows), "
+            f"got {table.row_count}"
+        )
+        assert post_flip_calls == [], (
+            f"mine_only flip on Recent must NOT refetch; "
+            f"got {len(post_flip_calls)} calls"
         )
 
 

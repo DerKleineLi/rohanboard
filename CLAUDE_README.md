@@ -80,7 +80,7 @@ Cluster-specific TOMLs (e.g. `/tmp/wsl_single_v2_4c_ssh_config.toml`) carry only
 ## Config knobs
 
 - **`[refresh]` intervals** — `slurm_jobs = 5` / `slurm_nodes = 30` / `storage = 60` (seconds). LRZ bumps `slurm_jobs` to ≥ 15 to absorb the ~10 s cold-ProxyJump on first ssh round-trip.
-- **`[refresh] sacct_max_rows`** (Bundle 1 Sub-fix 2, 2026-05-11) — optional int cap on the recent-jobs list kept in each snapshot. `None` / unset → keep every row sacct returned (previous hardcoded `[:50]` is gone). Set when sacct floods (thousands of completed jobs) and DataTable re-render dominates click latency. Wired in `rohanboard/app.py` via `slurm.cap_sacct(list(reversed(parsed)), cap)`.
+- **`[refresh.sacct]`** (Bundle 2 B2.1, 2026-05-11) — nested table with four dotted keys: `starttime.self` (default `"now-7days"`), `starttime.all` (default `"now-1day"`), `max_rows.self` (default `null` = no cap), `max_rows.all` (default `null` = no cap). Two parallel sacct queries run per tick (same ssh round-trip): `-u $USER --starttime=<self>` populates `snap.recent_jobs_self`, `-a --starttime=<all>` populates `snap.recent_jobs_all`. JobsTable's Recent mode reads from whichever the `mine_only` toggle selects → mine_only flip on Recent becomes a snapshot SWAP, not a refetch. Bundle 1's `[refresh] sacct_max_rows` field is REMOVED — replaced by the two per-snapshot caps. Snapshot field `recent_jobs` is REMOVED; readers must migrate to `recent_jobs_self` or `recent_jobs_all`.
 
 ## Smoke-test pane
 

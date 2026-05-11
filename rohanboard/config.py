@@ -42,15 +42,35 @@ class StorageEntryConfig:
 
 
 @dataclass
+class SacctRefreshConfig:
+    """Bundle-2 B2.1: per-snapshot sacct knobs. Two parallel queries
+    fetched per tick:
+      * `self`: `-u $USER --starttime=<starttime_self>` — long history
+        of the user's own jobs (cheap; few rows).
+      * `all`:  `--starttime=<starttime_all>` (no -u) — short window
+        across all users (potentially many rows).
+    Mine_only flip on Recent mode picks which snapshot to render — no
+    refetch, both are pre-staged."""
+    starttime_self: str = "now-7days"
+    starttime_all: str = "now-1day"
+    # `None` = keep all rows the parser returned. Per-snapshot caps so
+    # the long-history self list can stay uncapped while the wide
+    # all-users list is throttled, or vice versa.
+    max_rows_self: int | None = None
+    max_rows_all: int | None = None
+
+
+@dataclass
 class RefreshConfig:
     slurm_jobs: int = 5
     slurm_nodes: int = 30
     storage: int = 60
-    # Optional cap on the recent-jobs (sacct) list kept in each snapshot.
-    # `None` = keep all rows the parser returned. Set to a positive int
-    # to trim — useful when sacct returns thousands of entries and the
-    # DataTable re-render dominates click-path latency.
-    sacct_max_rows: int | None = None
+    # Bundle-2 B2.1: nested sacct config. Bundle 1's `sacct_max_rows`
+    # field is GONE — its replacement lives on `sacct.max_rows_self`
+    # and `sacct.max_rows_all`. TOML shape: `[refresh.sacct]` with
+    # dotted keys `starttime.self`, `starttime.all`, `max_rows.self`,
+    # `max_rows.all`.
+    sacct: SacctRefreshConfig = field(default_factory=SacctRefreshConfig)
 
 
 @dataclass
@@ -171,6 +191,14 @@ def _default_storage() -> list[StorageEntryConfig]:
     ]
 
 
+def _optional_int(v: Any) -> int | None:
+    """Coerce TOML scalars to Optional[int]. `null` / missing → None.
+    Caller is responsible for treating None as 'no cap'."""
+    if v is None:
+        return None
+    return int(v)
+
+
 def load(path: Path | None = None) -> Config:
     path = Path(path or DEFAULT_CONFIG_PATH).expanduser()
     raw: dict[str, Any] = {}
@@ -183,12 +211,24 @@ def load(path: Path | None = None) -> Config:
     if r := raw.get("refresh"):
         refresh_kwargs: dict[str, Any] = {}
         for k, v in r.items():
-            if k not in RefreshConfig.__dataclass_fields__:
-                continue
-            if k == "sacct_max_rows":
-                # Accept `None` / missing → no cap. Otherwise positive int.
-                refresh_kwargs[k] = None if v is None else int(v)
-            else:
+            if k == "sacct":
+                # Bundle-2 B2.1: nested table.
+                #   [refresh.sacct]
+                #   starttime.self = "now-7days"   # → {"starttime": {"self": ...}}
+                #   starttime.all  = "now-1day"
+                #   max_rows.self  = null
+                #   max_rows.all   = null
+                if not isinstance(v, dict):
+                    continue
+                starttime = v.get("starttime", {}) or {}
+                max_rows = v.get("max_rows", {}) or {}
+                refresh_kwargs["sacct"] = SacctRefreshConfig(
+                    starttime_self=str(starttime.get("self", "now-7days")),
+                    starttime_all=str(starttime.get("all", "now-1day")),
+                    max_rows_self=_optional_int(max_rows.get("self")),
+                    max_rows_all=_optional_int(max_rows.get("all")),
+                )
+            elif k in RefreshConfig.__dataclass_fields__:
                 refresh_kwargs[k] = int(v)
         cfg.refresh = RefreshConfig(**refresh_kwargs)
 

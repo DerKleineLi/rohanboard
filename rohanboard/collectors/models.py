@@ -122,7 +122,16 @@ class UtilizationSample:
 class Snapshot:
     """Whatever the collectors managed to fetch on the last refresh."""
     jobs: list[Job] = field(default_factory=list)
-    recent_jobs: list[Job] = field(default_factory=list)   # from sacct
+    # Bundle-2 B2.1: `recent_jobs` is replaced by two parallel snapshots
+    # fetched per-tick from two different sacct queries:
+    #   * `recent_jobs_self`  ← `sacct -u $USER --starttime=<starttime_self>`
+    #     long history of the user's own jobs (cheap; few rows).
+    #   * `recent_jobs_all`   ← `sacct --starttime=<starttime_all>` (no -u)
+    #     short window across all users (still potentially many rows).
+    # Mine_only flip on Recent mode swaps which list the JobsTable
+    # renders — no refetch, single ssh tick still serves both.
+    recent_jobs_self: list[Job] = field(default_factory=list)
+    recent_jobs_all: list[Job] = field(default_factory=list)
     nodes: list[Node] = field(default_factory=list)
     storage: list[StorageEntry] = field(default_factory=list)
     history: list[UtilizationSample] = field(default_factory=list)

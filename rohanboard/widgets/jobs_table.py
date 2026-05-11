@@ -610,9 +610,15 @@ class JobsTable(Widget):
         prev_scroll_y = table.scroll_y
         prev_cursor = table.cursor_coordinate
 
-        jobs: list[Job] = snapshot.jobs if self.mode == "active" else getattr(snapshot, "recent_jobs", [])
-        err_key = "jobs" if self.mode == "active" else "recent_jobs"
         mine_only = self._app_mine_only()
+        # Bundle-2 B2.1: Recent mode reads from one of two pre-staged
+        # snapshots — `recent_jobs_self` (mine_only=True) vs
+        # `recent_jobs_all` (mine_only=False). Mine_only flip on
+        # Recent becomes a snapshot SWAP (zero ssh), not a refetch
+        # and not a client-side filter of the same row set. Active
+        # mode still applies a client-side mine_only filter (squeue
+        # fetches all users every tick).
+        jobs, err_key = self._jobs_for_mode(snapshot, mine_only)
 
         if (err := snapshot.errors.get(err_key)) or not jobs:
             self._row_keys.clear()
@@ -632,14 +638,12 @@ class JobsTable(Widget):
 
         matcher = make_matcher(self.filter_text, list(_JOB_FILTER_DEFAULT_FIELDS))
         jobs = [j for j in jobs if matcher(_job_filter_record(j))]
-        # Phase 4d.2-D: client-side mine_only filter. Read from
-        # `app.mine_only` (the App's reactive — single source of truth)
-        # so flipping it via any path triggers consistent filtering
-        # across JobsTable + CompactJobs. cluster_user is stamped on
-        # each snapshot by app._refresh_all (resolved REMOTE whoami).
-        # On cold start (cluster_user == "") fall through to "show
-        # everything" — better than blocking the table behind an async
-        # whoami probe.
+        # Phase 4d.2-D: client-side mine_only filter for ACTIVE mode
+        # only. Active fetches all users every tick (squeue has no -u
+        # filter applied), so the filter runs at render time. Recent
+        # mode already picked the right snapshot above; the additional
+        # filter is a no-op there but harmless (recent_jobs_self is
+        # already user-filtered server-side).
         if mine_only and snapshot.cluster_user:
             jobs = [j for j in jobs if j.user == snapshot.cluster_user]
         jobs.sort(key=lambda j: _sort_value(j, self._sort_col), reverse=self._sort_reverse)
@@ -790,6 +794,31 @@ class JobsTable(Widget):
 
     # ── data ────────────────────────────────────────────────
 
+    def _jobs_for_mode(
+        self, snapshot: Snapshot, mine_only: bool,
+    ) -> tuple[list[Job], str]:
+        """Return `(jobs_list, snapshot_errors_key)` for the current mode.
+
+        Active → `snap.jobs` (squeue, all users; client filters mine_only).
+        Recent + mine_only=True  → `snap.recent_jobs_self` (sacct -u $USER).
+        Recent + mine_only=False → `snap.recent_jobs_all`  (sacct, no -u).
+
+        The Recent branches are pre-staged on different ssh-side queries
+        (Bundle-2 B2.1); mine_only flip becomes a snapshot SWAP, not a
+        refetch.
+        """
+        if self.mode == "active":
+            return snapshot.jobs, "jobs"
+        if mine_only:
+            return (
+                getattr(snapshot, "recent_jobs_self", []),
+                "recent_jobs_self",
+            )
+        return (
+            getattr(snapshot, "recent_jobs_all", []),
+            "recent_jobs_all",
+        )
+
     def _empty_state_message(
         self,
         mine_only: bool,
@@ -888,9 +917,11 @@ class JobsTable(Widget):
         prev_scroll_y = table.scroll_y
         prev_cursor = table.cursor_coordinate
 
-        jobs: list[Job] = snapshot.jobs if self.mode == "active" else getattr(snapshot, "recent_jobs", [])
-        err_key = "jobs" if self.mode == "active" else "recent_jobs"
         mine_only = self._app_mine_only()
+        # Bundle-2 B2.1: see `_apply_filter_async` for the rationale —
+        # Recent reads from `recent_jobs_self` or `recent_jobs_all`,
+        # Active reads from `snap.jobs`.
+        jobs, err_key = self._jobs_for_mode(snapshot, mine_only)
 
         if (err := snapshot.errors.get(err_key)) or not jobs:
             self._row_keys.clear()

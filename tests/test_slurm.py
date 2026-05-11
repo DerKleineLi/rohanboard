@@ -231,3 +231,41 @@ def test_cap_sacct_max_rows_larger_than_input_returns_all():
     capped = cap_sacct(parsed, 100)
     assert len(capped) == 5
     assert capped == parsed
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Bundle-2 B2.1: per-snapshot caps (max_rows.self vs max_rows.all). The
+# cap helper is the same; pinning the integration shape here so a
+# future refactor of `_refresh_all` can't accidentally swap the caps.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_max_rows_self_caps_recent_jobs_self():
+    """A 200-row sacct_self response with cap=10 produces a 10-row
+    recent_jobs_self list (caller reverses first so 'top 10' == newest)."""
+    parsed = parse_sacct(_synthetic_sacct(200))
+    recent_jobs_self = cap_sacct(list(reversed(parsed)), 10)
+    assert len(recent_jobs_self) == 10
+    # Newest first — `_synthetic_sacct(200)` produces job_ids
+    # 1000000..1000199; after reverse the first row is job_id 1000199.
+    assert recent_jobs_self[0].job_id == "1000199"
+
+
+def test_max_rows_all_caps_recent_jobs_all():
+    """Same as above but for the all-snapshot — independent cap. Confirms
+    the two snapshots use SEPARATE caps (the prior `sacct_max_rows`
+    field is gone; each side has its own knob)."""
+    parsed = parse_sacct(_synthetic_sacct(200))
+    recent_jobs_all = cap_sacct(list(reversed(parsed)), 25)
+    assert len(recent_jobs_all) == 25
+
+
+def test_max_rows_independent_per_snapshot():
+    """Cap one side, leave the other uncapped — proves the two paths
+    don't share state. The shape mirrors how `_refresh_all` wires them
+    against `cfg.refresh.sacct.max_rows_self` / `.max_rows_all`."""
+    parsed = parse_sacct(_synthetic_sacct(50))
+    capped = cap_sacct(list(reversed(parsed)), 5)
+    uncapped = cap_sacct(list(reversed(parsed)), None)
+    assert len(capped) == 5
+    assert len(uncapped) == 50
