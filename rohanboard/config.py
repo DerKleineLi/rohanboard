@@ -46,6 +46,11 @@ class RefreshConfig:
     slurm_jobs: int = 5
     slurm_nodes: int = 30
     storage: int = 60
+    # Optional cap on the recent-jobs (sacct) list kept in each snapshot.
+    # `None` = keep all rows the parser returned. Set to a positive int
+    # to trim — useful when sacct returns thousands of entries and the
+    # DataTable re-render dominates click-path latency.
+    sacct_max_rows: int | None = None
 
 
 @dataclass
@@ -176,7 +181,16 @@ def load(path: Path | None = None) -> Config:
     cfg = Config()
 
     if r := raw.get("refresh"):
-        cfg.refresh = RefreshConfig(**{k: int(v) for k, v in r.items() if k in RefreshConfig.__dataclass_fields__})
+        refresh_kwargs: dict[str, Any] = {}
+        for k, v in r.items():
+            if k not in RefreshConfig.__dataclass_fields__:
+                continue
+            if k == "sacct_max_rows":
+                # Accept `None` / missing → no cap. Otherwise positive int.
+                refresh_kwargs[k] = None if v is None else int(v)
+            else:
+                refresh_kwargs[k] = int(v)
+        cfg.refresh = RefreshConfig(**refresh_kwargs)
 
     if s := raw.get("slurm"):
         cfg.slurm = SlurmConfig(

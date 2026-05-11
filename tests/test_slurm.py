@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from rohanboard.collectors.slurm import parse_scontrol_show_node, parse_squeue
+from rohanboard.collectors.slurm import (
+    SACCT_FORMAT,
+    cap_sacct,
+    parse_sacct,
+    parse_scontrol_show_node,
+    parse_squeue,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -172,3 +178,56 @@ def test_parse_node_lrz_mig_aggregates_at_node_level():
     assert "2g.20gb" in g.kind
     assert "1g.10gb" in g.kind
     assert g.kind.startswith("MIG")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Bundle-1 Sub-fix-2: sacct_max_rows cap_or_no_cap behavior.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _synthetic_sacct(n: int) -> str:
+    """Build a `-P` pipe-separated sacct stdout with `n` jobs. Matches
+    SACCT_FORMAT order: JobID,Partition,JobName,User,State,NodeList,Elapsed,NCPUS,ReqTRES."""
+    rows = []
+    for i in range(n):
+        rows.append(
+            f"100{i:04d}|gpu_a100|job_{i}|alice|COMPLETED|"
+            f"node{i % 8:02d}|00:0{i % 10}:00|4|"
+            f"cpu=4,mem=16G,gres/gpu=1"
+        )
+    return "\n".join(rows) + "\n"
+
+
+def test_cap_sacct_no_cap_keeps_all_rows():
+    """sacct_max_rows=None (default) must keep every parsed row.
+    Caught a regression where a hardcoded [:50] was silently dropping
+    rows past the cap on long-running clusters."""
+    text = _synthetic_sacct(200)
+    parsed = parse_sacct(text)
+    assert len(parsed) == 200, f"parser should keep all rows, got {len(parsed)}"
+    # cap=None → no cap.
+    capped = cap_sacct(parsed, None)
+    assert len(capped) == 200
+    assert capped is parsed or capped == parsed
+
+
+def test_cap_sacct_trims_to_max_rows():
+    """sacct_max_rows=10 trims a 200-row list to the first 10
+    (caller passes already-reversed list, so 'first 10' == newest 10)."""
+    text = _synthetic_sacct(200)
+    parsed = parse_sacct(text)
+    capped = cap_sacct(parsed, 10)
+    assert len(capped) == 10
+    # Cap preserves order (no re-sort) so the first 10 of the parsed
+    # list survive untouched.
+    assert capped[0].job_id == parsed[0].job_id
+    assert capped[-1].job_id == parsed[9].job_id
+
+
+def test_cap_sacct_max_rows_larger_than_input_returns_all():
+    """Cap larger than available rows is a no-op (returns the whole list)."""
+    text = _synthetic_sacct(5)
+    parsed = parse_sacct(text)
+    capped = cap_sacct(parsed, 100)
+    assert len(capped) == 5
+    assert capped == parsed

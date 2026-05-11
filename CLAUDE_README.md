@@ -77,6 +77,11 @@ These rules were established by Phase F+H+A+G and MUST be honored by any future 
 
 Cluster-specific TOMLs (e.g. `/tmp/wsl_single_v2_4c_ssh_config.toml`) carry only cluster-specific knobs (ssh entry, storage paths). Override `[layout]` only when a cluster has unusual UI needs.
 
+## Config knobs
+
+- **`[refresh]` intervals** — `slurm_jobs = 5` / `slurm_nodes = 30` / `storage = 60` (seconds). LRZ bumps `slurm_jobs` to ≥ 15 to absorb the ~10 s cold-ProxyJump on first ssh round-trip.
+- **`[refresh] sacct_max_rows`** (Bundle 1 Sub-fix 2, 2026-05-11) — optional int cap on the recent-jobs list kept in each snapshot. `None` / unset → keep every row sacct returned (previous hardcoded `[:50]` is gone). Set when sacct floods (thousands of completed jobs) and DataTable re-render dominates click latency. Wired in `rohanboard/app.py` via `slurm.cap_sacct(list(reversed(parsed)), cap)`.
+
 ## Smoke-test pane
 
 The canonical Phase 4c+ smoke pane is `rohan:rb-v2-4c-ssh` (NOT `rohan:rohanboard-wsl` — that one is the older `clean-reimpl` multi-cluster build with `c Cycle cluster` binding). LRZ smoke runs in a separate window `rohan:rb-v2-lrz` so it doesn't clobber the rohan pane.

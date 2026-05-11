@@ -292,3 +292,20 @@ def test_lrz_config_loads():
     # only the base columns (no per-node SSD/HDD; LRZ has no
     # /cluster/<node> autofs structure).
     assert cfg.nodes_table.columns == []
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Bundle-1 Sub-fix-2: sacct_max_rows config knob.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_sacct_max_rows_defaults_to_none(tmp_path):
+    """Empty config → sacct_max_rows is None (= no cap, keep all)."""
+    cfg = load(_write(tmp_path, ""))
+    assert cfg.refresh.sacct_max_rows is None
+
+
+def test_sacct_max_rows_parses_positive_int(tmp_path):
+    """`sacct_max_rows = 25` lands as int 25 on cfg.refresh."""
+    cfg = load(_write(tmp_path, "[refresh]\nsacct_max_rows = 25\n"))
+    assert cfg.refresh.sacct_max_rows == 25

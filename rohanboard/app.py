@@ -400,14 +400,19 @@ class RohanBoardApp(App):
                 # sacct → recent_jobs
                 try:
                     recent = slurm.parse_sacct(raw.sacct)
-                    snap.recent_jobs = list(reversed(recent))[:50]
+                    snap.recent_jobs = slurm.cap_sacct(
+                        list(reversed(recent)),
+                        self.cfg.refresh.sacct_max_rows,
+                    )
                     sacct_lines = raw.sacct.count("\n")
                     if not raw.sacct.endswith("\n") and raw.sacct:
                         sacct_lines += 1
+                    cap = self.cfg.refresh.sacct_max_rows
+                    cap_note = "no cap" if cap is None else f"cap={cap}"
                     self._debug_log(
                         f"sacct: {sacct_lines} lines, "
-                        f"parsed {len(recent)} jobs (kept top "
-                        f"{len(snap.recent_jobs)}; "
+                        f"parsed {len(recent)} jobs (kept "
+                        f"{len(snap.recent_jobs)}; {cap_note}; "
                         f"drop={sacct_lines - len(recent)})"
                     )
                 except Exception as e:

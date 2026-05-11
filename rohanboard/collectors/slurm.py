@@ -365,6 +365,18 @@ def parse_sacct(text: str) -> list[Job]:
     return jobs
 
 
+def cap_sacct(jobs: list[Job], max_rows: int | None) -> list[Job]:
+    """Apply optional row cap to the parsed sacct list.
+
+    `max_rows is None` (or <= 0) → return all rows. Else slice to the top
+    `max_rows`. Callers reverse the parsed list FIRST (sacct returns
+    oldest-first; the UI wants newest-first), so the slice keeps the
+    most-recent N rows."""
+    if max_rows is None or max_rows <= 0:
+        return jobs
+    return jobs[:max_rows]
+
+
 def parse_scontrol_show_job(text: str) -> dict[str, str]:
     """Single-job key=value extractor (same shape as the node parser)."""
     return dict(_KV_RE.findall(text))
