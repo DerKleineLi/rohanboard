@@ -311,6 +311,16 @@ class JobsTable(Widget):
         background: $error;
         text-style: bold;
     }
+    JobsTable .empty_placeholder {
+        display: none;
+        height: 1fr;
+        min-height: 1;
+        width: 100%;
+        padding: 1 2;
+    }
+    JobsTable .empty_placeholder.-visible { display: block; }
+    JobsTable DataTable.-hidden { display: none; }
+    JobsTable SortableHeader.-hidden { display: none; }
     """
 
     BINDINGS = []
@@ -364,6 +374,12 @@ class JobsTable(Widget):
             table = DataTable(zebra_stripes=True, cursor_type="row",
                               show_header=False, id="jobs_table_dt")
             yield table
+            # Full-width empty-state placeholder. Rendering "— no active
+            # jobs —" inside the DataTable's first column truncated it
+            # to "— no acti…" on narrow Job columns. Show this Static
+            # instead — hides the table + header while visible so the
+            # message renders at the widget's full width.
+            yield Static("", id="empty_placeholder", classes="empty_placeholder")
 
     def on_mount(self) -> None:
         self._rebuild_columns(_COLUMNS_ACTIVE)
@@ -596,16 +612,19 @@ class JobsTable(Widget):
 
         jobs: list[Job] = snapshot.jobs if self.mode == "active" else getattr(snapshot, "recent_jobs", [])
         err_key = "jobs" if self.mode == "active" else "recent_jobs"
+        mine_only = self._app_mine_only()
 
         if (err := snapshot.errors.get(err_key)) or not jobs:
             self._row_keys.clear()
             table.clear()
-            n_cols = len(self._current_columns)
             if err:
+                self._clear_empty_placeholder()
+                n_cols = len(self._current_columns)
                 table.add_row(Text(f"⚠ {err}", style="bold red"), *([""] * (n_cols - 1)))
             else:
-                kind = "active" if self.mode == "active" else "recent"
-                table.add_row(Text(f"— no {kind} jobs —", style="dim italic"), *([""] * (n_cols - 1)))
+                self._render_empty_placeholder(
+                    self._empty_state_message(mine_only, snapshot.cluster_user)
+                )
             return
 
         matcher = make_matcher(self.filter_text, list(_JOB_FILTER_DEFAULT_FIELDS))
@@ -618,7 +637,6 @@ class JobsTable(Widget):
         # On cold start (cluster_user == "") fall through to "show
         # everything" — better than blocking the table behind an async
         # whoami probe.
-        mine_only = self._app_mine_only()
         if mine_only and snapshot.cluster_user:
             jobs = [j for j in jobs if j.user == snapshot.cluster_user]
         jobs.sort(key=lambda j: _sort_value(j, self._sort_col), reverse=self._sort_reverse)
@@ -699,18 +717,11 @@ class JobsTable(Widget):
             perf_log("filter", f"apply_filter_async_{self.mode}", total_ms, extra=extra)
 
         if not jobs:
-            n_cols = len(self._current_columns)
-            if self.filter_text:
-                empty_msg = (
-                    f"— no jobs match '{self.filter_text}'"
-                    f"{' (mine only)' if mine_only and snapshot.cluster_user else ''} —"
-                )
-            elif mine_only and snapshot.cluster_user:
-                empty_msg = f"— no active jobs for {snapshot.cluster_user} —"
-            else:
-                empty_msg = "— no active jobs —"
-            table.add_row(Text(empty_msg, style="dim italic"),
-                          *([""] * (n_cols - 1)))
+            self._render_empty_placeholder(
+                self._empty_state_message(mine_only, snapshot.cluster_user)
+            )
+        else:
+            self._clear_empty_placeholder()
 
         try:
             table.cursor_coordinate = prev_cursor
@@ -773,6 +784,44 @@ class JobsTable(Widget):
 
     # ── data ────────────────────────────────────────────────
 
+    def _empty_state_message(self, mine_only: bool, cluster_user: str) -> str:
+        """Parametrized empty/no-match placeholder text by mode + filter.
+
+        active mode → "no active jobs"; recent mode → "no recent jobs".
+        Filter-mismatch and mine_only branches keep the existing
+        breadcrumbs so the user can tell WHY the table is empty.
+        """
+        kind = "active" if self.mode == "active" else "recent"
+        if self.filter_text:
+            suffix = " (mine only)" if mine_only and cluster_user else ""
+            return f"— no jobs match '{self.filter_text}'{suffix} —"
+        if mine_only and cluster_user:
+            return f"— no {kind} jobs for {cluster_user} —"
+        return f"— no {kind} jobs —"
+
+    def _render_empty_placeholder(self, msg: str) -> None:
+        """Show full-width empty Static; hide DataTable + SortableHeader.
+        Caller is responsible for clearing any stale rows from the table
+        (its rows are invisible while hidden but the row_count survives)."""
+        try:
+            placeholder = self.query_one("#empty_placeholder", Static)
+            placeholder.update(Text(msg, style="dim italic"))
+            placeholder.add_class("-visible")
+            self.query_one("#jobs_table_dt", DataTable).add_class("-hidden")
+            self.query_one(SortableHeader).add_class("-hidden")
+        except Exception:
+            pass
+
+    def _clear_empty_placeholder(self) -> None:
+        """Hide the empty-state Static; re-show DataTable + SortableHeader."""
+        try:
+            placeholder = self.query_one("#empty_placeholder", Static)
+            placeholder.remove_class("-visible")
+            self.query_one("#jobs_table_dt", DataTable).remove_class("-hidden")
+            self.query_one(SortableHeader).remove_class("-hidden")
+        except Exception:
+            pass
+
     def _rebuild_columns(self, cols) -> None:
         table = self.query_one("#jobs_table_dt", DataTable)
         table.clear(columns=True)
@@ -823,16 +872,19 @@ class JobsTable(Widget):
 
         jobs: list[Job] = snapshot.jobs if self.mode == "active" else getattr(snapshot, "recent_jobs", [])
         err_key = "jobs" if self.mode == "active" else "recent_jobs"
+        mine_only = self._app_mine_only()
 
         if (err := snapshot.errors.get(err_key)) or not jobs:
             self._row_keys.clear()
             table.clear()
-            n_cols = len(self._current_columns)
             if err:
+                self._clear_empty_placeholder()
+                n_cols = len(self._current_columns)
                 table.add_row(Text(f"⚠ {err}", style="bold red"), *([""] * (n_cols - 1)))
             else:
-                kind = "active" if self.mode == "active" else "recent"
-                table.add_row(Text(f"— no {kind} jobs —", style="dim italic"), *([""] * (n_cols - 1)))
+                self._render_empty_placeholder(
+                    self._empty_state_message(mine_only, snapshot.cluster_user)
+                )
             return
 
         matcher = make_matcher(self.filter_text, list(_JOB_FILTER_DEFAULT_FIELDS))
@@ -840,7 +892,6 @@ class JobsTable(Widget):
         # Phase 4d.2-D: client-side mine_only — see `_apply_filter_async`
         # for the same predicate; both paths must filter identically so
         # the table content matches whichever rebuild path landed last.
-        mine_only = self._app_mine_only()
         if mine_only and snapshot.cluster_user:
             jobs = [j for j in jobs if j.user == snapshot.cluster_user]
         jobs.sort(key=lambda j: _sort_value(j, self._sort_col), reverse=self._sort_reverse)
@@ -921,18 +972,11 @@ class JobsTable(Widget):
             perf_log("filter", f"update_snapshot_{self.mode}", total_ms, extra=extra)
 
         if not jobs:
-            n_cols = len(self._current_columns)
-            if self.filter_text:
-                empty_msg = (
-                    f"— no jobs match '{self.filter_text}'"
-                    f"{' (mine only)' if mine_only and snapshot.cluster_user else ''} —"
-                )
-            elif mine_only and snapshot.cluster_user:
-                empty_msg = f"— no active jobs for {snapshot.cluster_user} —"
-            else:
-                empty_msg = "— no active jobs —"
-            table.add_row(Text(empty_msg, style="dim italic"),
-                          *([""] * (n_cols - 1)))
+            self._render_empty_placeholder(
+                self._empty_state_message(mine_only, snapshot.cluster_user)
+            )
+        else:
+            self._clear_empty_placeholder()
 
         try:
             table.cursor_coordinate = prev_cursor

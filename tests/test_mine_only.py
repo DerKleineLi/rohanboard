@@ -211,7 +211,11 @@ async def test_mine_only_toggle_does_not_call_refresh_all():
 async def test_mine_only_empty_state_message_names_the_user():
     """When mine_only=True and the user has zero jobs, the empty-state
     placeholder should say "no active jobs for <user>" — distinguishes
-    "you have nothing running" from "no jobs anywhere"."""
+    "you have nothing running" from "no jobs anywhere".
+
+    Bundle-1 Sub-fix-1: the placeholder is now a full-width Static
+    (`#empty_placeholder`) so the message no longer truncates against
+    a narrow Job column. Test queries the Static, not the DataTable."""
     app = RohanBoardApp(config=_minimal_overview_config())
     async with app.run_test() as pilot:
         tabbed = app.query_one(TabbedContent)
@@ -226,14 +230,60 @@ async def test_mine_only_empty_state_message_names_the_user():
         app.snapshot = snap
         await pilot.pause(0.4)
 
-        table = app.query_one(JobsTable).query_one("#jobs_table_dt", DataTable)
-        # Single placeholder row, not zero.
-        assert table.row_count == 1
-        # Read the first cell of the placeholder row.
-        cell = table.get_cell_at((0, 0))
-        cell_str = str(cell)
-        assert "hli" in cell_str, (
-            f"empty-state message should name the user, got {cell_str!r}"
+        jt = app.query_one(JobsTable)
+        placeholder = jt.query_one("#empty_placeholder", Static)
+        msg = str(placeholder.render())
+        assert "hli" in msg, (
+            f"empty-state message should name the user, got {msg!r}"
+        )
+        # And the table itself is hidden (zero data rows visible).
+        table = jt.query_one("#jobs_table_dt", DataTable)
+        assert table.row_count == 0, (
+            f"table should be empty (placeholder Static carries the message), "
+            f"got row_count={table.row_count}"
+        )
+
+
+async def test_empty_placeholder_text_differs_by_mode():
+    """Bundle-1 Sub-fix-1: placeholder is parametrized by JobsTable.mode.
+    Active mode → "no active jobs"; Recent mode → "no recent jobs".
+
+    Same empty snapshot, two modes — strings must differ so the user
+    knows WHICH list is empty when they flip the toggle."""
+    app = RohanBoardApp(config=_minimal_overview_config())
+    async with app.run_test() as pilot:
+        tabbed = app.query_one(TabbedContent)
+        tabbed.active = "jobs"
+        await pilot.pause()
+
+        # Empty in both modes — no jobs and no recent_jobs.
+        snap = Snapshot()
+        snap.jobs = []
+        snap.recent_jobs = []
+        snap.cluster_user = ""    # bypass mine_only branch
+        app.mine_only = False
+        app.snapshot = snap
+        await pilot.pause(0.3)
+
+        jt = app.query_one(JobsTable)
+        placeholder = jt.query_one("#empty_placeholder", Static)
+
+        # Force mode=active explicitly (it's the default but make it
+        # explicit so the test is independent of init defaults).
+        jt.mode = "active"
+        await pilot.pause(0.3)
+        active_msg = str(placeholder.render())
+
+        # Flip to recent.
+        jt.mode = "recent"
+        await pilot.pause(0.3)
+        recent_msg = str(placeholder.render())
+
+        assert "active" in active_msg, f"active mode: {active_msg!r}"
+        assert "recent" in recent_msg, f"recent mode: {recent_msg!r}"
+        assert active_msg != recent_msg, (
+            f"placeholder must differ between modes; "
+            f"active={active_msg!r} recent={recent_msg!r}"
         )
 
 
