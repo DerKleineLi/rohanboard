@@ -63,18 +63,45 @@ class CombinedRaw:
 SectionMap = dict[str, str]
 
 
-def build_script(sections: SectionMap) -> str:
+# Per-sub-command wall-clock cap (seconds). Each section body runs under
+# `timeout`, so ONE slow/hung command (a wedged NFS quota/df, a stuck
+# scontrol against a busy controller) degrades to an empty section instead
+# of blocking the shared `wait` and wedging the WHOLE tick. Must stay BELOW
+# the App's per-tick budget: rohan's master refresh interval is 5 s and
+# `_refresh_all` is `@work(exclusive=True)`, so a tick not done in ~5 s is
+# cancelled by the next one — capping each command at 4 s lets the fast
+# sections still dump within that window while a hang is killed (LRZ's 15 s
+# interval has even more slack). Warm commands run in <0.1 s and cold
+# autofs/scontrol well under 4 s on both rohan + LRZ (measured 2026-06-05),
+# so legit commands are never caught. `timeout` is GNU coreutils, confirmed
+# present on both login nodes (rohan 8.30 / LRZ 8.32). This is the
+# defense-in-depth backstop behind the `quota -l` fix: `-l` removes today's
+# known hanger, this prevents any FUTURE one from re-freezing the board.
+PER_CMD_TIMEOUT_SECS = 4
+
+
+def build_script(sections: SectionMap, cmd_timeout: int = PER_CMD_TIMEOUT_SECS) -> str:
     """Build the bash script that runs every section in parallel + emits
-    sectioned output. Pure function — no I/O. Tested in isolation."""
+    sectioned output. Pure function — no I/O. Tested in isolation.
+
+    Each section body is wrapped in `timeout -k 1 <cmd_timeout> bash -c
+    <body>` so a single hanging command can't hold the shared `wait`. The
+    inner `bash -c` re-parses the body, so globs (`df /cluster/*`),
+    shlex-quoted args (squeue/sacct), and the dssusrinfo subshell all expand
+    exactly as they did unwrapped. `timeout` exits 124 on expiry, which the
+    existing `|| true` absorbs so `wait` always sees success.
+    """
     parallel_lines = []
     dump_lines = []
     for name in sections:
         # Each sub-shell writes to a tempfile; stderr is dropped (we only
         # care about stdout for parsing). `|| true` keeps `wait` from
         # seeing a nonzero exit code from any one sub-command — we want
-        # all sections collected even if some failed.
+        # all sections collected even if some failed (incl. timeout's 124).
+        # `timeout -k 1 N`: SIGTERM at N s, SIGKILL 1 s later if ignored.
+        body = f"timeout -k 1 {cmd_timeout} bash -c {shlex.quote(sections[name])}"
         parallel_lines.append(
-            f'( {sections[name]} > "$T/{name}" 2>/dev/null || true ) &'
+            f'( {body} > "$T/{name}" 2>/dev/null || true ) &'
         )
         dump_lines.append(
             f'echo "{SECTION_DELIM}{name}"; '

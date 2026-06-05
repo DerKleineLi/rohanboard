@@ -8,6 +8,7 @@ collectors/combined.py docstring on rohan's MaxSessions=10 cap).
 from __future__ import annotations
 
 from rohanboard.collectors.combined import (
+    PER_CMD_TIMEOUT_SECS,
     SECTION_DELIM,
     SECTION_END,
     build_script,
@@ -79,15 +80,18 @@ def test_parse_combined_unterminated_section_still_captured():
 
 
 def test_build_script_runs_each_section_in_parallel():
-    """Each section becomes a `( cmd > tempfile ... ) &` invocation,
-    followed by `wait`, then the dump loop."""
+    """Each section becomes a backgrounded `( timeout … bash -c <body> >
+    tempfile … ) &` invocation, followed by `wait`, then the dump loop."""
     script = build_script({
         "mounts": "cat /proc/mounts",
         "quota": "quota -u hli",
     })
-    # Both sections background.
-    assert "( cat /proc/mounts > " in script
-    assert "( quota -u hli > " in script
+    # Both sections background, each redirecting into its own tempfile.
+    assert '> "$T/mounts" 2>/dev/null || true ) &' in script
+    assert '> "$T/quota" 2>/dev/null || true ) &' in script
+    # The original command body survives verbatim inside the wrap.
+    assert "cat /proc/mounts" in script
+    assert "quota -u hli" in script
     assert script.count(" &") >= 2
     # Single `wait` between parallel and dump loop.
     assert "\nwait\n" in script
@@ -95,6 +99,36 @@ def test_build_script_runs_each_section_in_parallel():
     assert f'echo "{SECTION_DELIM}mounts"' in script
     assert f'echo "{SECTION_DELIM}quota"' in script
     assert f'echo "{SECTION_END}"' in script
+
+
+def test_build_script_wraps_each_section_in_timeout():
+    """Defense-in-depth: every section body runs under `timeout -k 1 N
+    bash -c <body>` so one hanging command degrades to an empty section
+    instead of blocking the shared `wait` and wedging the whole tick
+    (2026-06-05 quota-hang freeze). The inner `bash -c` re-parses the body
+    so globs / quoted args / the dssusrinfo subshell still expand."""
+    script = build_script({
+        "mounts": "cat /proc/mounts",
+        "df": "df -B1 /cluster/* /cluster_HDD/*",
+        "squeue": "squeue -h -O 'JobID:|,State:|'",
+    })
+    # Each body is wrapped — N is the module default, killed 1 s after TERM.
+    assert f"timeout -k 1 {PER_CMD_TIMEOUT_SECS} bash -c " in script
+    # One wrap per section.
+    assert script.count("timeout -k 1 ") == 3
+    # The wrapped body is single-quoted; the glob survives for the inner
+    # shell to expand, and an already-quoted arg round-trips intact.
+    assert "timeout -k 1 4 bash -c 'cat /proc/mounts'" in script
+    assert "df -B1 /cluster/* /cluster_HDD/*" in script
+    assert "JobID:|,State:|" in script
+
+
+def test_build_script_timeout_value_is_configurable():
+    """cmd_timeout overrides the per-command cap (tunable per cluster if a
+    future config wants a tighter/looser budget)."""
+    script = build_script({"mounts": "cat /proc/mounts"}, cmd_timeout=9)
+    assert "timeout -k 1 9 bash -c 'cat /proc/mounts'" in script
+    assert "timeout -k 1 4 " not in script
 
 
 def test_build_script_traps_exit_for_tempdir_cleanup():
@@ -299,8 +333,9 @@ async def test_fetch_combined_includes_whoami_section():
         sacct_user=None,
     )
     script = fake.calls[0][0][2]
-    # Whoami runs in the parallel block.
-    assert "( whoami > " in script, (
+    # Whoami runs in the parallel block (under the timeout wrap), redirecting
+    # to its own tempfile.
+    assert 'bash -c whoami > "$T/whoami"' in script, (
         f"whoami section missing from script:\n{script}"
     )
     # Parser extracts it.
