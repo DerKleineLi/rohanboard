@@ -246,6 +246,31 @@ async def test_fetch_combined_quota_skipped_when_no_user():
     assert "quota -u" not in script
 
 
+async def test_fetch_combined_quota_uses_local_only_flag():
+    """The quota section MUST pass `-l` (--local-only). Plain
+    `quota -u <user>` probes every NFS mount via rquotad RPC; on rohan's
+    login node an unresponsive NFS server hangs the call >125 s, which —
+    because quota runs inside the combined script's `wait` — blocks the
+    whole tick and freezes the board (home never appears in Storage).
+    rohan home (/rhome) is local, so `-l` returns its quota fast.
+    Regression guard for the 2026-06-05 home-missing incident."""
+    fake = _FakeExecutor(response=(0, "", ""))
+    await fetch_combined(
+        fake,
+        quota_user="hli",
+        df_explicit_paths=[],
+        df_prefix_globs=[],
+        squeue_format="x",
+        squeue_users=None,
+        sacct_format="y",
+        sacct_starttime_self="now",
+        sacct_starttime_all="now",
+        sacct_user=None,
+    )
+    script = fake.calls[0][0][2]
+    assert "quota -u hli -l" in script
+
+
 async def test_fetch_combined_includes_whoami_section():
     """Bundle-1 Sub-fix-3: the combined script unconditionally includes
     a `whoami` section so REMOTE username arrives WITH the first tick

@@ -161,7 +161,19 @@ async def fetch_combined(
         "whoami": "whoami",
     }
     if quota_user:
-        sections["quota"] = f"quota -u {shlex.quote(quota_user)}"
+        # `-l` / --local-only: query ONLY local filesystems, skipping NFS.
+        # Plain `quota -u <user>` probes EVERY mounted fs — including NFS —
+        # by issuing an rquotad RPC per NFS server. rohan's login node has
+        # many NFS mounts (/canis/*, /hamsa, /sirion, /menegroth, …) and at
+        # least one server's rquotad never answers, so the call hangs >125 s.
+        # Because the quota sub-command runs inside this script's `wait`, that
+        # hang blocks the WHOLE combined tick; the App's 5 s exclusive refresh
+        # interval then cancels the in-flight fetch, so every post-cold-start
+        # tick is lost and the board freezes on its first (whoami-less, hence
+        # quota-less) snapshot — home never appears in Storage. rohan's home
+        # (/rhome) is a LOCAL fs, so `-l` returns its quota (incl. the 300 GiB
+        # soft limit) in ~30 ms. (2026-06-05 rohan home-missing incident.)
+        sections["quota"] = f"quota -u {shlex.quote(quota_user)} -l"
     # df accepts a mix of explicit paths and shell globs; the remote
     # bash expands the globs. Quote explicit paths to handle spaces;
     # globs are left raw.

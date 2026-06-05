@@ -68,7 +68,13 @@ async def fetch_quota(
     user = user or os.environ.get("USER", "")
     if not user:
         return None
-    rc, out, err = await executor.run(["quota", "-u", user], timeout=10.0)
+    # `-l` / --local-only: skip NFS filesystems. Plain `quota -u <user>`
+    # issues an rquotad RPC per NFS mount; on a login node with an
+    # unresponsive NFS server (rohan: /canis/*, /hamsa, /sirion, …) that
+    # hangs for minutes. Home filesystems backing a `kind="quota"` entry
+    # are local (rohan /rhome), so `-l` returns the quota in ~30 ms instead
+    # of wedging. See collectors/combined.py for the live-path rationale.
+    rc, out, err = await executor.run(["quota", "-u", user, "-l"], timeout=10.0)
     # `quota` returns non-zero when the user is over quota — output is still valid.
     text = out or err
     return parse_quota(text, label=label, filesystem=filesystem)
