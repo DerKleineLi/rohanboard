@@ -344,3 +344,103 @@ async def test_async_ssh_executor_run_timeout_cleans_session():
         await ex.run(["sleep", "60"], timeout=0.1)
     assert len(closed_processes) == 1
     assert ex._conn is not None  # parent connection preserved
+
+
+async def test_async_ssh_executor_run_reconnects_on_dropped_connection(monkeypatch):
+    """A dropped persistent connection (asyncssh.ConnectionLost on the next
+    use) must trigger ONE reconnect + retry, not wedge forever. Pins the
+    2026-06-05 both-boards-wedged fix: pre-fix, a single NAT idle-drop made
+    every subsequent refresh tick fail permanently because run() never reset
+    self._conn and asyncssh never auto-reconnects."""
+    import asyncssh
+
+    class _HealthyProcess:
+        exit_status = 0
+
+        async def communicate(self):
+            return ("OK", "")
+
+        def close(self):  # pragma: no cover - not exercised on success
+            pass
+
+        async def wait_closed(self):  # pragma: no cover
+            return None
+
+    class _DeadConn:
+        """Simulates a connection that died since last use: create_process
+        raises ConnectionLost (what asyncssh raises on a closed connection)."""
+
+        def is_closed(self):
+            return False  # not yet flagged closed; failure surfaces on use
+
+        async def create_process(self, _cmd):
+            raise asyncssh.ConnectionLost("connection lost")
+
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            return None
+
+    class _HealthyConn:
+        def is_closed(self):
+            return False
+
+        async def create_process(self, _cmd):
+            return _HealthyProcess()
+
+        def close(self):  # pragma: no cover
+            pass
+
+        async def wait_closed(self):  # pragma: no cover
+            return None
+
+    ex = AsyncSSHExecutor(host="example.invalid")
+    ex._conn = _DeadConn()
+
+    connects = {"n": 0}
+
+    async def fake_connect():
+        connects["n"] += 1
+        ex._conn = _HealthyConn()
+
+    monkeypatch.setattr(ex, "connect", fake_connect)
+
+    rc, out, err = await ex.run(["echo", "x"])
+    assert (rc, out, err) == (0, "OK", "")
+    assert connects["n"] == 1  # reconnected exactly once
+    assert isinstance(ex._conn, _HealthyConn)
+
+
+async def test_async_ssh_executor_run_propagates_second_consecutive_drop(monkeypatch):
+    """Retry is ONCE, not a loop: if the rebuilt connection also drops, the
+    error propagates instead of spinning forever."""
+    import asyncssh
+
+    class _AlwaysDeadConn:
+        def is_closed(self):
+            return False
+
+        async def create_process(self, _cmd):
+            raise asyncssh.ConnectionLost("still dead")
+
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            return None
+
+    ex = AsyncSSHExecutor(host="example.invalid")
+    ex._conn = _AlwaysDeadConn()
+
+    connects = {"n": 0}
+
+    async def fake_connect():
+        connects["n"] += 1
+        ex._conn = _AlwaysDeadConn()
+
+    monkeypatch.setattr(ex, "connect", fake_connect)
+
+    with pytest.raises(asyncssh.ConnectionLost):
+        await ex.run(["echo", "x"])
+    assert connects["n"] == 1  # exactly one rebuild attempt, then give up

@@ -194,6 +194,16 @@ class AsyncSSHExecutor:
             kwargs: dict[str, object] = {
                 "host": self.host,
                 "port": self.port,
+                # asyncssh sends NO keepalives by default (keepalive_interval=0),
+                # so a persistent connection idling through TUM's NAT (~2 h idle
+                # drop — see cluster_rohan.md) is silently killed. The
+                # ServerAliveInterval in ~/.ssh/config is OpenSSH-subprocess-only
+                # and does NOT apply to asyncssh. Send a keepalive after 30 s of
+                # idle and tear the link down after 5 unanswered (~2.5 min) so
+                # run()'s reconnect path rebuilds it on the next tick instead of
+                # wedging forever. (2026-06-05 both-boards-wedged incident.)
+                "keepalive_interval": 30,
+                "keepalive_count_max": 5,
             }
             if self.username is not None:
                 kwargs["username"] = self.username
@@ -211,6 +221,35 @@ class AsyncSSHExecutor:
                 timeout=self.connect_timeout,
             )
 
+    def _conn_is_dead(self) -> bool:
+        """True if the persistent connection is known-closed and must be
+        rebuilt. Defensive: returns False when liveness can't be determined
+        (e.g. a test stub without `is_closed`) so we never refuse to use an
+        otherwise-fine connection."""
+        conn = self._conn
+        if conn is None:
+            return True
+        is_closed = getattr(conn, "is_closed", None)
+        if is_closed is None:
+            return False
+        try:
+            return bool(is_closed())
+        except Exception:
+            return False
+
+    def _discard_conn(self) -> None:
+        """Drop the (presumed-dead) persistent connection so the next call
+        reconnects. Best-effort synchronous close; never raises."""
+        conn, self._conn = self._conn, None
+        if conn is None:
+            return
+        close = getattr(conn, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception:
+                pass
+
     async def run(
         self,
         argv: Sequence[str],
@@ -218,59 +257,81 @@ class AsyncSSHExecutor:
     ) -> tuple[int, str, str]:
         if timeout is None:
             timeout = DEFAULT_RUN_TIMEOUT
-        if self._conn is None:
-            await self.connect()
-        assert self._conn is not None
-        # Use create_process so we can explicitly close() the half-open
-        # session on cancel/timeout. `conn.run()` is a higher-level wrapper
-        # that doesn't expose the channel, so cleanup is implicit there.
-        # We want explicit control to mirror LocalExecutor's kill+shielded-wait
-        # pattern (feedback_asyncio_subprocess_cancel_leaks.md) — even though
-        # asyncssh's connection is persistent, an in-flight session that's
-        # been cancelled mid-execution can leave a remote process running
-        # until the connection is dropped.
-        #
+        import asyncssh  # lazy — for the connection-dead exception check
         # asyncssh's run/create_process take a STRING command (passed to the
         # remote login shell), NOT an argv list. We shlex.join here so callers
         # can keep the list-of-args interface that LocalExecutor uses. This
         # quotes embedded whitespace/specials safely.
-        conn = self._conn
-        process: object | None = None
         cmd = shlex.join(argv)
-        try:
-            process = await conn.create_process(cmd)  # type: ignore[attr-defined]
-            # Wrap the wait in asyncio.wait_for since asyncssh's own timeout
-            # doesn't always apply to all phases of session I/O
-            # (asyncssh#411, #626).
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),  # type: ignore[attr-defined]
-                timeout=timeout,
-            )
-            rc = int(process.exit_status or 0)  # type: ignore[attr-defined]
-        except BaseException:
-            # TimeoutError, CancelledError, KeyboardInterrupt — clean up
-            # the half-open session before propagating. The parent
-            # connection (`self._conn`) is preserved for reuse.
-            if process is not None:
-                try:
-                    process.close()  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-                # Shield the wait so the cancellation that brought us here
-                # doesn't also cancel the cleanup. asyncssh's process.wait()
-                # is the analogue of subprocess.wait().
-                try:
-                    await asyncio.shield(process.wait_closed())  # type: ignore[attr-defined]
-                except BaseException:
-                    pass
-            raise
-        # Some asyncssh versions return bytes when channel I/O was binary;
-        # normalize defensively.
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", errors="replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", errors="replace")
-        return rc, stdout or "", stderr or ""
+        # Try at most twice. A persistent connection that died (NAT idle-drop,
+        # server restart, sshd renewal) raises a connection-level error on its
+        # NEXT use, and asyncssh never auto-reconnects — so without this a
+        # single drop wedged every subsequent refresh tick forever (2026-06-05
+        # both-boards-wedged incident). We discard the dead connection and
+        # rebuild it ONCE; a second failure propagates. Timeout / cancellation
+        # are NOT connection-death and re-raise immediately, preserving the
+        # original cancellation-safe cleanup contract.
+        for attempt in (0, 1):
+            if self._conn is None or self._conn_is_dead():
+                self._discard_conn()
+                await self.connect()
+            assert self._conn is not None
+            # Use create_process so we can explicitly close() the half-open
+            # session on cancel/timeout. `conn.run()` is a higher-level wrapper
+            # that doesn't expose the channel, so cleanup is implicit there. We
+            # want explicit control to mirror LocalExecutor's kill+shielded-wait
+            # pattern (feedback_asyncio_subprocess_cancel_leaks.md) — even
+            # though asyncssh's connection is persistent, an in-flight session
+            # cancelled mid-execution can leave a remote process running until
+            # the connection is dropped.
+            conn = self._conn
+            process: object | None = None
+            try:
+                process = await conn.create_process(cmd)  # type: ignore[attr-defined]
+                # Wrap the wait in asyncio.wait_for since asyncssh's own timeout
+                # doesn't always apply to all phases of session I/O
+                # (asyncssh#411, #626).
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),  # type: ignore[attr-defined]
+                    timeout=timeout,
+                )
+                rc = int(process.exit_status or 0)  # type: ignore[attr-defined]
+            except BaseException as exc:
+                # Always tear down the half-open session first (original
+                # contract). Shield the wait so the cancellation that brought
+                # us here doesn't also cancel the cleanup.
+                if process is not None:
+                    try:
+                        process.close()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                    try:
+                        await asyncio.shield(process.wait_closed())  # type: ignore[attr-defined]
+                    except BaseException:
+                        pass
+                # A connection-level failure (OSError / asyncssh.Error, but NOT
+                # a TimeoutError — which subclasses OSError on 3.11+) means the
+                # persistent connection is dead: discard it and retry ONCE.
+                conn_dead = (
+                    isinstance(exc, (OSError, asyncssh.Error))
+                    and not isinstance(exc, asyncio.TimeoutError)
+                )
+                if conn_dead and attempt == 0:
+                    self._discard_conn()
+                    continue
+                # Timeout, cancellation, KeyboardInterrupt, or a second
+                # connection failure: propagate. The persistent connection is
+                # preserved for reuse unless we already discarded it above.
+                raise
+            # Some asyncssh versions return bytes when channel I/O was binary;
+            # normalize defensively.
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+            return rc, stdout or "", stderr or ""
+        # Unreachable: the loop either returns or raises on attempt 1.
+        raise AssertionError("unreachable")  # pragma: no cover
 
     async def aclose(self) -> None:
         conn = self._conn
