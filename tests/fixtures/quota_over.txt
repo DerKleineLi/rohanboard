@@ -1,0 +1,4 @@
+Disk quotas for user hli (uid 10069): 
+     Filesystem  blocks   quota   limit   grace   files   quota   limit   grace
+/dev/mapper/i28storage-data
+                332845944* 314572800 419430400    none 1687803       0       0        

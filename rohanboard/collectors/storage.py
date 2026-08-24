@@ -8,7 +8,12 @@ from ..exec import Executor
 from .models import StorageEntry
 
 
-_QUOTA_NUM_RE = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)")
+# `quota` appends `*` to a value that is over its soft limit (e.g.
+# `332845944* 314572800 419430400`), with NO space before the `*`. The
+# `\*?` after each number keeps the two-line form parsing once the user
+# goes over quota — without it `parse_quota` returns None and home
+# silently vanishes from Storage/Overview. (2026-08-23 over-quota incident.)
+_QUOTA_NUM_RE = re.compile(r"^\s*(\d+)\*?\s+(\d+)\*?\s+(\d+)\*?")
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -44,7 +49,7 @@ def parse_quota(text: str, label: str, filesystem: str | None = None) -> Storage
                         )
             continue
         # Inline form: filesystem and numbers on the same line.
-        m = re.match(r"^\s*(\S+)\s+(\d+)\s+(\d+)\s+(\d+)", line)
+        m = re.match(r"^\s*(\S+)\s+(\d+)\*?\s+(\d+)\*?\s+(\d+)\*?", line)
         if m and m.group(1).startswith("/"):
             fs, used_kb, soft_kb, hard_kb = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
             if filesystem is None or fs == filesystem:

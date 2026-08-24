@@ -71,6 +71,24 @@ def test_parse_quota_two_line_form():
     assert 0.85 < entry.fraction < 0.95
 
 
+def test_parse_quota_over_soft_limit_asterisk():
+    """`quota` marks an over-soft-limit value with a trailing `*` and NO
+    space before it. The parser must still find the row — otherwise home
+    disappears from Storage/Overview exactly when it matters most.
+    (2026-08-23: /rhome at 318G against the 300G soft limit.)"""
+    text = (FIXTURES / "quota_over.txt").read_text()
+    entry = parse_quota(text, label="home")
+    assert entry is not None
+    assert entry.source == "quota"
+    assert entry.path == "/dev/mapper/i28storage-data"
+    assert entry.used_bytes == 332845944 * 1024
+    assert entry.total_bytes == 314572800 * 1024
+    assert entry.hard_limit_bytes == 419430400 * 1024
+    # Over the soft limit; `fraction` clamps at 1.0 so the bar reads full.
+    assert entry.used_bytes > entry.total_bytes
+    assert entry.fraction == 1.0
+
+
 def test_parse_df_first_mount():
     text = (FIXTURES / "df.txt").read_text()
     entry = parse_df(text, label="balar", path="/cluster/balar")
